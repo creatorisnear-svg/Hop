@@ -40,6 +40,56 @@ export function useAutoSpeak(): [boolean, (v: boolean) => void] {
   return [on, (v) => setAutoSpeak(v)];
 }
 
+// Pick the best available British male voice — the Jarvis / Iron Man feel.
+// Ordered by quality / closeness to that calm, posh-butler timbre.
+function pickJarvisVoice(): SpeechSynthesisVoice | null {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) return null;
+  const voices = window.speechSynthesis.getVoices();
+  if (!voices.length) return null;
+
+  const isGB = (v: SpeechSynthesisVoice) => /en[-_]?GB/i.test(v.lang);
+  const byName = (re: RegExp) => voices.find((v) => isGB(v) && re.test(v.name));
+
+  // 1. Specific high-quality British male voices on common platforms
+  const named =
+    byName(/daniel/i) ??                                  // macOS / iOS — closest to Jarvis
+    byName(/google.*uk.*english.*male/i) ??               // Chrome/Android
+    byName(/google.*uk.*male/i) ??
+    byName(/microsoft.*(ryan|george|thomas|oliver)/i) ??  // Windows / Edge natural voices
+    byName(/(ryan|george|thomas|oliver|arthur)/i);
+  if (named) return named;
+
+  // 2. Any British voice that mentions "male"
+  const gbMale = voices.find((v) => isGB(v) && /male/i.test(v.name));
+  if (gbMale) return gbMale;
+
+  // 3. Any en-GB voice at all (often male by default)
+  const anyGB = voices.find(isGB);
+  if (anyGB) return anyGB;
+
+  // 4. Last resort: any English voice
+  return voices.find((v) => /^en/i.test(v.lang)) ?? null;
+}
+
+let voicesReadyPromise: Promise<void> | null = null;
+function waitForVoices(): Promise<void> {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) return Promise.resolve();
+  if (window.speechSynthesis.getVoices().length > 0) return Promise.resolve();
+  if (voicesReadyPromise) return voicesReadyPromise;
+  voicesReadyPromise = new Promise<void>((resolve) => {
+    const onChange = () => {
+      if (window.speechSynthesis.getVoices().length > 0) {
+        window.speechSynthesis.removeEventListener("voiceschanged", onChange);
+        resolve();
+      }
+    };
+    window.speechSynthesis.addEventListener("voiceschanged", onChange);
+    // Safety timeout — some browsers never fire the event
+    setTimeout(() => resolve(), 1500);
+  });
+  return voicesReadyPromise;
+}
+
 export function speak(text: string, opts: { rate?: number; pitch?: number } = {}): void {
   if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
   const stripped = text
@@ -48,17 +98,28 @@ export function speak(text: string, opts: { rate?: number; pitch?: number } = {}
     .replace(/\s+/g, " ")
     .trim();
   if (!stripped) return;
-  const u = new SpeechSynthesisUtterance(stripped.slice(0, 1500));
-  u.rate = opts.rate ?? 1.05;
-  u.pitch = opts.pitch ?? 1;
-  // Try to pick a male/neutral English voice for "Jarvis" feel
-  const voices = window.speechSynthesis.getVoices();
-  const preferred =
-    voices.find((v) => /en[-_]?(GB|US)/i.test(v.lang) && /(male|daniel|google.*uk|alex)/i.test(v.name)) ??
-    voices.find((v) => /en/i.test(v.lang));
-  if (preferred) u.voice = preferred;
-  window.speechSynthesis.cancel();
-  window.speechSynthesis.speak(u);
+
+  const utter = () => {
+    const u = new SpeechSynthesisUtterance(stripped.slice(0, 1500));
+    // Calm, slightly lower-pitched butler cadence
+    u.rate = opts.rate ?? 0.98;
+    u.pitch = opts.pitch ?? 0.92;
+    const voice = pickJarvisVoice();
+    if (voice) {
+      u.voice = voice;
+      u.lang = voice.lang;
+    } else {
+      u.lang = "en-GB";
+    }
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(u);
+  };
+
+  if (window.speechSynthesis.getVoices().length === 0) {
+    void waitForVoices().then(utter);
+  } else {
+    utter();
+  }
 }
 
 export function stopSpeaking(): void {
