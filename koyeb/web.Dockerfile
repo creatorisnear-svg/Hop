@@ -13,27 +13,32 @@ COPY scripts ./scripts
 
 RUN pnpm install --frozen-lockfile
 
-# Build SPA + bundle API server
+# Build SPA + bundle API server (esbuild produces a single self-contained dist/index.mjs)
 RUN pnpm --filter @workspace/neuro-brain run build \
  && pnpm --filter @workspace/api-server run build
 
-# ----- Runtime image -----
+# Runtime-only deps for the drizzle push step
+RUN mkdir /runtime-deps && cd /runtime-deps \
+ && npm init -y > /dev/null \
+ && npm install --omit=dev --no-audit --no-fund \
+      drizzle-kit@0.31.9 \
+      drizzle-orm@0.45.2 \
+      pg@8.20.0 \
+      tsx@4.20.7
+
+# ----- Slim runtime image -----
 FROM node:20-bookworm-slim AS runtime
 
 ENV NODE_ENV=production
 WORKDIR /app
 
-# Copy bundled API server (single esbuild output) and the SPA build
+# Bundled API server (single file) + built SPA assets
 COPY --from=builder /app/artifacts/api-server/dist ./dist
 COPY --from=builder /app/artifacts/neuro-brain/dist/public ./dist/public
 
-# Copy drizzle config + schema for first-boot db push
-ENV PNPM_HOME=/pnpm
-ENV PATH=$PNPM_HOME:$PATH
-RUN corepack enable && corepack prepare pnpm@10.26.1 --activate
-COPY --from=builder /app/lib ./lib
-COPY --from=builder /app/pnpm-workspace.yaml /app/pnpm-lock.yaml /app/package.json /app/.npmrc ./
-COPY --from=builder /app/node_modules ./node_modules
+# Just enough to run `drizzle-kit push` against the schema on first boot
+COPY --from=builder /runtime-deps/node_modules ./node_modules
+COPY --from=builder /app/lib/db ./lib/db
 
 COPY koyeb/start.sh /app/start.sh
 RUN chmod +x /app/start.sh

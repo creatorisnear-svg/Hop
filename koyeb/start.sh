@@ -2,7 +2,8 @@
 set -euo pipefail
 
 echo "[start.sh] pushing database schema..."
-pnpm --filter @workspace/db run push || echo "[start.sh] WARN: drizzle push failed, continuing"
+( cd /app/lib/db && npx --no-install drizzle-kit push --config ./drizzle.config.ts ) \
+  || echo "[start.sh] WARN: drizzle push failed, continuing"
 
 echo "[start.sh] starting api server on :${PORT:-8080}"
-exec node --enable-source-maps ./dist/index.mjs
+exec node --enable-source-maps /app/dist/index.mjs

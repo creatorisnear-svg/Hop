@@ -25,10 +25,10 @@ This deploys the whole thing — Express API + React UI bundled into one contain
 1. Sign in at https://app.koyeb.com → **Create Service** → **GitHub** → pick this repo.
 2. **Builder:** Dockerfile.
 3. **Dockerfile location:** `koyeb/web.Dockerfile`
-4. **Instance type:** `Eco-small` (1GB) — the build needs more than 512MB, so the free tier may OOM.
+4. **Instance type:** `Free` (512MB) — the build runs on Koyeb's separate build infrastructure, so the small instance is plenty for runtime.
 5. **Region:** pick the one closest to you and your DB.
 6. **Port:** `8080`, HTTP, route `/`.
-7. **Health check:** HTTP `GET /api/healthz` on port 8080, grace period 60s.
+7. **Health check:** HTTP `GET /api/healthz` on port 8080, grace period 120s.
 8. **Environment variables / secrets:**
    - `DATABASE_URL` → your Postgres connection string (mark as Secret)
    - `GEMINI_API_KEY` → your Google AI key (mark as Secret)
@@ -66,10 +66,10 @@ Push to GitHub. In Koyeb, click **Redeploy** on the service (or set **Auto-deplo
 
 ### Common gotchas
 
-- **Build OOMs on free tier.** Use Eco-small.
+- **Free tier sleeps after ~10 min idle.** First request wakes it; expect 10–20s.
 - **`DATABASE_URL` for Neon needs `?sslmode=require`.**
-- **Health check fails for the first ~30s** — that's normal, the API is bundling. The 60s grace period covers it.
 - **Gemini errors at boot:** check the `GEMINI_API_KEY` secret is set and not pasted with extra whitespace.
+- **No Groq keys?** The brain regions will fail. Add at least one `GROQ_API_KEY_1` (free at console.groq.com).
 
 ---
 
