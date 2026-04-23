@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { db, regionsTable, runsTable, messagesTable, type RegionRow } from "@workspace/db";
 import { eq } from "drizzle-orm";
-import { ollamaChat, type OllamaChatMessage } from "./ollama";
+import { groqChat, type GroqChatMessage } from "./groq";
 import { brainBus } from "./eventBus";
 import { logger } from "./logger";
 import { jarvisPlan, jarvisSynthesize, type JarvisPlan, type RegionKey } from "./jarvis";
@@ -72,17 +72,11 @@ async function callRegion(
     await recordMessage(runId, region.key, region.role, iteration, skip, 0);
     return skip;
   }
-  if (!region.ollamaUrl) {
-    throw new Error(
-      `${region.name} has no Ollama URL configured. Open Regions and paste your Koyeb URL.`,
-    );
-  }
-  const messages: OllamaChatMessage[] = [
+  const messages: GroqChatMessage[] = [
     { role: "system", content: region.systemPrompt },
     { role: "user", content: userPrompt },
   ];
-  const result = await ollamaChat({
-    baseUrl: region.ollamaUrl,
+  const result = await groqChat({
     model: region.model,
     messages,
     temperature: effectiveTemp,
@@ -274,7 +268,7 @@ export async function ensureRegionsSeeded(
       systemPrompt: d.systemPrompt,
       temperature: d.temperature,
       ollamaUrl: "",
-      model: "qwen2.5:1.5b-instruct",
+      model: "llama-3.3-70b-versatile",
       enabled: true,
     })),
   );

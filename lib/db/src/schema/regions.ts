@@ -6,7 +6,7 @@ export const regionsTable = pgTable("regions", {
   name: text("name").notNull(),
   description: text("description").notNull(),
   ollamaUrl: text("ollama_url").notNull().default(""),
-  model: text("model").notNull().default("qwen2.5:1.5b-instruct"),
+  model: text("model").notNull().default("llama-3.3-70b-versatile"),
   systemPrompt: text("system_prompt").notNull(),
   temperature: real("temperature").notNull().default(0.7),
   enabled: boolean("enabled").notNull().default(true),

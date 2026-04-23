@@ -10,7 +10,8 @@ An autonomous multi-agent AI orchestrator. Six "brain regions" — each a separa
 | API | Express + Pino + SSE | `artifacts/api-server` |
 | DB | Postgres + Drizzle ORM | `lib/db` |
 | API contract | OpenAPI 3 → Orval → typed React Query hooks + Zod schemas | `lib/api-spec`, `lib/api-zod`, `lib/api-client-react` |
-| Agents | 6 Ollama HTTP endpoints (Koyeb) running Qwen 2.5 | external |
+| Agents | 6 brain regions running on Groq (Llama 3.3 70B by default) with round-robin across 10 API keys | `artifacts/api-server/src/lib/groq.ts` |
+| Coordinator | Jarvis runs on Gemini 2.5 Flash via Replit AI Integrations | `artifacts/api-server/src/lib/jarvis.ts` |
 
 ### Brain regions
 1. **Sensory Cortex** — researcher (extracts signals from the prompt)
