@@ -10,6 +10,7 @@ import NewRun from "@/pages/new-run";
 import LiveRun from "@/pages/live-run";
 import Regions from "@/pages/regions";
 import Runs from "@/pages/runs";
+import SynapsesPage from "@/pages/synapses";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -27,6 +28,7 @@ function Router() {
       <Route path="/run/:id" component={LiveRun} />
       <Route path="/regions" component={Regions} />
       <Route path="/runs" component={Runs} />
+      <Route path="/synapses" component={SynapsesPage} />
       <Route component={NotFound} />
     </Switch>
   );

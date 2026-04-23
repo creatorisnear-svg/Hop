@@ -212,6 +212,21 @@ paths:
                 items:
                   $ref: "#/components/schemas/RegionActivity"
 
+  /synapses:
+    get:
+      operationId: listSynapses
+      tags: [synapses]
+      summary: List all learned region-pair connections, strongest first
+      responses:
+        "200":
+          description: Synapse list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Synapse"
+
 components:
   schemas:
     HealthStatus:
@@ -396,3 +411,25 @@ components:
           type: integer
         avgLatencyMs:
           type: number
+
+    Synapse:
+      type: object
+      required: [fromRegion, toRegion, successCount, totalCount, strength, lastFiredAt, updatedAt]
+      properties:
+        fromRegion:
+          type: string
+        toRegion:
+          type: string
+        successCount:
+          type: integer
+        totalCount:
+          type: integer
+        strength:
+          type: number
+          description: Smoothed success rate, 0..1
+        lastFiredAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time

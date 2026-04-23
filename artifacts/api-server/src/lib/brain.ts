@@ -5,6 +5,7 @@ import { ollamaChat, type OllamaChatMessage } from "./ollama";
 import { brainBus } from "./eventBus";
 import { logger } from "./logger";
 import { jarvisPlan, jarvisSynthesize, type JarvisPlan, type RegionKey } from "./jarvis";
+import { planningHint, reinforcePath } from "./synapses";
 
 const cancelled = new Set<string>();
 
@@ -121,10 +122,11 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
     await setRunStatus(runId, { status: "running" });
     const regions = await loadRegions();
 
-    // ----- Jarvis plans the run -----
+    // ----- Jarvis plans the run (with synapse hints from prior runs) -----
     checkCancel();
     const planStart = Date.now();
-    const plan = await jarvisPlan(goal);
+    const hint = await planningHint();
+    const plan = await jarvisPlan(goal, hint);
     await recordMessage(
       runId,
       "jarvis",
@@ -180,6 +182,18 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
       iterations: stepIndex,
       completedAt,
     });
+
+    // ----- Reinforce the synapses that fired in this successful run -----
+    try {
+      const sequence = synthInputs.map((s) => s.region);
+      // Outcome scales down with iteration count: a clean 6-step run scores 1.0,
+      // longer/messier runs reinforce less.
+      const outcome = Math.max(0.3, Math.min(1, 6 / Math.max(stepIndex, 1)));
+      await reinforcePath(sequence, outcome);
+    } catch (err) {
+      logger.warn({ err, runId }, "synapse reinforcement failed (non-fatal)");
+    }
+
     brainBus.emitRun(runId, { type: "done", runId, payload: { finalAnswer } });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

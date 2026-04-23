@@ -352,3 +352,17 @@ export const GetRegionActivityResponseItem = zod.object({
 export const GetRegionActivityResponse = zod.array(
   GetRegionActivityResponseItem,
 );
+
+/**
+ * @summary List all learned region-pair connections, strongest first
+ */
+export const ListSynapsesResponseItem = zod.object({
+  fromRegion: zod.string(),
+  toRegion: zod.string(),
+  successCount: zod.number(),
+  totalCount: zod.number(),
+  strength: zod.number().describe("Smoothed success rate, 0..1"),
+  lastFiredAt: zod.coerce.date(),
+  updatedAt: zod.coerce.date(),
+});
+export const ListSynapsesResponse = zod.array(ListSynapsesResponseItem);

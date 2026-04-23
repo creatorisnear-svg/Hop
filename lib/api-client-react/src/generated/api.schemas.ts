@@ -127,6 +127,17 @@ export interface RegionActivity {
   avgLatencyMs: number;
 }
 
+export interface Synapse {
+  fromRegion: string;
+  toRegion: string;
+  successCount: number;
+  totalCount: number;
+  /** Smoothed success rate, 0..1 */
+  strength: number;
+  lastFiredAt: string;
+  updatedAt: string;
+}
+
 export type ListRunsParams = {
   limit?: number;
 };

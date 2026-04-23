@@ -19,4 +19,5 @@ export * from "./regionKey";
 export * from "./runDetail";
 export * from "./runStatus";
 export * from "./runSummary";
+export * from "./synapse";
 export * from "./updateRegionInput";

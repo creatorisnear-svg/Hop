@@ -87,12 +87,15 @@ function isValidPlan(value: unknown): value is JarvisPlan {
   return true;
 }
 
-export async function jarvisPlan(goal: string): Promise<JarvisPlan> {
+export async function jarvisPlan(goal: string, hint?: string): Promise<JarvisPlan> {
   try {
+    const userText = hint
+      ? `Goal:\n${goal}\n\n${hint}`
+      : `Goal:\n${goal}`;
     const resp = await ai.models.generateContent({
       model: MODEL,
       contents: [
-        { role: "user", parts: [{ text: `Goal:\n${goal}` }] },
+        { role: "user", parts: [{ text: userText }] },
       ],
       config: {
         systemInstruction: PLAN_SYSTEM,

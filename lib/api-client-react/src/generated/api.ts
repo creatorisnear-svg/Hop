@@ -27,6 +27,7 @@ import type {
   RegionKey,
   RunDetail,
   RunSummary,
+  Synapse,
   UpdateRegionInput,
 } from "./api.schemas";
 
@@ -1009,6 +1010,81 @@ export function useGetRegionActivity<
   request?: SecondParameter<typeof customFetch>;
 }): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetRegionActivityQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary List all learned region-pair connections, strongest first
+ */
+export const getListSynapsesUrl = () => {
+  return `/api/synapses`;
+};
+
+export const listSynapses = async (
+  options?: RequestInit,
+): Promise<Synapse[]> => {
+  return customFetch<Synapse[]>(getListSynapsesUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getListSynapsesQueryKey = () => {
+  return [`/api/synapses`] as const;
+};
+
+export const getListSynapsesQueryOptions = <
+  TData = Awaited<ReturnType<typeof listSynapses>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof listSynapses>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getListSynapsesQueryKey();
+
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof listSynapses>>> = ({
+    signal,
+  }) => listSynapses({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof listSynapses>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type ListSynapsesQueryResult = NonNullable<
+  Awaited<ReturnType<typeof listSynapses>>
+>;
+export type ListSynapsesQueryError = ErrorType<unknown>;
+
+/**
+ * @summary List all learned region-pair connections, strongest first
+ */
+
+export function useListSynapses<
+  TData = Awaited<ReturnType<typeof listSynapses>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof listSynapses>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getListSynapsesQueryOptions(options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;
