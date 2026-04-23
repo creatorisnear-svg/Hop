@@ -1,0 +1,38 @@
+# Koyeb service for the NeuroLinked Brain web app (frontend + API).
+# Deploy with:  koyeb service create --file koyeb/web.yaml
+#
+# Required env / secrets (set in the Koyeb UI or via `koyeb secret create`):
+#   DATABASE_URL          Postgres connection string (Neon, Koyeb Postgres, etc.)
+#   GEMINI_API_KEY        Direct Gemini key from https://ai.google.dev/
+#   GROQ_API_KEY_1..10    Optional, for the Groq-powered brain regions
+
+name: neuro-brain-web
+type: web
+instance_type: eco-small        # 1GB RAM. "free" works but cold-starts and may OOM during build.
+regions:
+  - was
+ports:
+  - port: 8080
+    protocol: http
+routes:
+  - path: /
+    port: 8080
+health_checks:
+  - path: /api/healthz
+    port: 8080
+    interval: 30
+    grace_period: 60
+docker:
+  dockerfile: koyeb/web.Dockerfile
+env:
+  - key: NODE_ENV
+    value: production
+  - key: PORT
+    value: "8080"
+  - key: DATABASE_URL
+    secret: DATABASE_URL
+  - key: GEMINI_API_KEY
+    secret: GEMINI_API_KEY
+scaling:
+  min: 1
+  max: 1

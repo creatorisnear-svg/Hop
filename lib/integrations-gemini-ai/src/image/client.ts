@@ -1,24 +1,24 @@
 import { GoogleGenAI, Modality } from "@google/genai";
 
-if (!process.env.AI_INTEGRATIONS_GEMINI_BASE_URL) {
+const _replitBaseUrl = process.env.AI_INTEGRATIONS_GEMINI_BASE_URL;
+const _replitApiKey = process.env.AI_INTEGRATIONS_GEMINI_API_KEY;
+const _directApiKey = process.env.GEMINI_API_KEY;
+
+if (!_directApiKey && (!_replitBaseUrl || !_replitApiKey)) {
   throw new Error(
-    "AI_INTEGRATIONS_GEMINI_BASE_URL must be set. Did you forget to provision the Gemini AI integration?",
+    "Gemini credentials missing. Set GEMINI_API_KEY or both AI_INTEGRATIONS_GEMINI_BASE_URL and AI_INTEGRATIONS_GEMINI_API_KEY.",
   );
 }
 
-if (!process.env.AI_INTEGRATIONS_GEMINI_API_KEY) {
-  throw new Error(
-    "AI_INTEGRATIONS_GEMINI_API_KEY must be set. Did you forget to provision the Gemini AI integration?",
-  );
-}
-
-export const ai = new GoogleGenAI({
-  apiKey: process.env.AI_INTEGRATIONS_GEMINI_API_KEY,
-  httpOptions: {
-    apiVersion: "",
-    baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL,
-  },
-});
+export const ai = _directApiKey
+  ? new GoogleGenAI({ apiKey: _directApiKey })
+  : new GoogleGenAI({
+      apiKey: _replitApiKey!,
+      httpOptions: {
+        apiVersion: "",
+        baseUrl: _replitBaseUrl!,
+      },
+    });
 
 export async function generateImage(
   prompt: string
