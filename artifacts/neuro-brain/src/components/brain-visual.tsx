@@ -107,12 +107,19 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const labelLayerRef = useRef<HTMLDivElement>(null);
   const activeRegionRef = useRef<string | undefined>(activeRegion);
+  // Tracks when each region last fired (performance.now ms) — used so multiple
+  // recently-active regions all glow, fading over a few seconds.
+  const lastActiveAtRef = useRef<Record<string, number>>({});
   const lastSpawnRef = useRef<number>(0);
+  const focusTargetRef = useRef<string | null>(null);
   const [webglFailed, setWebglFailed] = useState(false);
 
   // keep the latest activeRegion accessible inside the animation loop
   useEffect(() => {
     activeRegionRef.current = activeRegion;
+    if (activeRegion) {
+      lastActiveAtRef.current[activeRegion] = performance.now();
+    }
   }, [activeRegion]);
 
   useEffect(() => {
@@ -238,9 +245,12 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
       const labelEl = document.createElement("div");
       const colorHex = "#" + color.toString(16).padStart(6, "0");
       labelEl.textContent = REGION_LABELS[key] ?? key;
+      labelEl.dataset.regionKey = key;
       labelEl.style.cssText = `
         position: absolute;
-        pointer-events: none;
+        pointer-events: auto;
+        cursor: pointer;
+        user-select: none;
         font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
         font-size: 9px;
         letter-spacing: 1.5px;
@@ -252,9 +262,24 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
         backdrop-filter: blur(4px);
         white-space: nowrap;
         transform: translate(-50%, -100%);
-        transition: opacity 0.2s;
+        transition: opacity 0.2s, background 0.2s, border-color 0.2s, transform 0.2s;
         will-change: transform, left, top;
       `;
+      labelEl.addEventListener("mouseenter", () => {
+        labelEl.style.background = "rgba(0,0,0,0.75)";
+        labelEl.style.borderColor = colorHex;
+      });
+      labelEl.addEventListener("mouseleave", () => {
+        labelEl.style.background = "rgba(0,0,0,0.45)";
+        labelEl.style.borderColor = colorHex + "40";
+      });
+      labelEl.addEventListener("click", (e) => {
+        e.stopPropagation();
+        focusTargetRef.current = key;
+        controls.autoRotate = false;
+        // Mark a small "ping" of activity so the user sees feedback
+        lastActiveAtRef.current[key] = performance.now();
+      });
       labelLayer.appendChild(labelEl);
 
       regionRefs[key] = { base, points, glow, labelEl, activity: 0 };
@@ -350,10 +375,24 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
       const dt = Math.min(clock.getDelta(), 0.05);
       timeAcc += dt;
 
-      // Drive activity from active region
+      // Drive activity from a TRAIL of recently-active regions, so when the
+      // brain cycles through SC -> AC -> HC -> PFC -> ... each one keeps glowing
+      // for a few seconds before fading.
       const active = activeRegionRef.current;
+      const now = performance.now();
+      const TRAIL_HOLD_MS = 2200;   // full intensity for this long after firing
+      const TRAIL_FADE_MS = 6000;   // total decay window
       for (const [key, r] of Object.entries(regionRefs)) {
-        const target = key === active ? 1 : 0.05;
+        const lastAt = lastActiveAtRef.current[key] ?? -Infinity;
+        const sinceMs = now - lastAt;
+        let trail = 0;
+        if (sinceMs <= TRAIL_HOLD_MS) {
+          trail = 1;
+        } else if (sinceMs < TRAIL_FADE_MS) {
+          trail = 1 - (sinceMs - TRAIL_HOLD_MS) / (TRAIL_FADE_MS - TRAIL_HOLD_MS);
+        }
+        // The currently-active region is pinned to 1; others use trail
+        const target = key === active ? 1 : Math.max(0.05, trail);
         // ease toward target
         r.activity += (target - r.activity) * Math.min(1, dt * 3);
 
@@ -452,10 +491,42 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
         }
       }
 
+      // Smooth camera focus when a label is clicked
+      const focusKey = focusTargetRef.current;
+      if (focusKey) {
+        const layout = REGION_LAYOUT[focusKey];
+        if (layout) {
+          const tx = layout.x;
+          const ty = layout.y + 0.05;
+          const tz = layout.z;
+          controls.target.x += (tx - controls.target.x) * Math.min(1, dt * 2.5);
+          controls.target.y += (ty - controls.target.y) * Math.min(1, dt * 2.5);
+          controls.target.z += (tz - controls.target.z) * Math.min(1, dt * 2.5);
+          // Pull the camera in a bit toward this region
+          const desiredDist = 2.6;
+          const dir = new THREE.Vector3()
+            .subVectors(camera.position, controls.target)
+            .normalize();
+          const targetCam = new THREE.Vector3()
+            .copy(controls.target)
+            .addScaledVector(dir, desiredDist);
+          camera.position.x += (targetCam.x - camera.position.x) * Math.min(1, dt * 2.5);
+          camera.position.y += (targetCam.y - camera.position.y) * Math.min(1, dt * 2.5);
+          camera.position.z += (targetCam.z - camera.position.z) * Math.min(1, dt * 2.5);
+        }
+      }
+
       controls.update();
       composer.render();
     }
     animate();
+
+    // Double-click on empty canvas: reset focus + resume auto-rotate
+    const onDblClick = () => {
+      focusTargetRef.current = null;
+      controls.autoRotate = true;
+    };
+    renderer.domElement.addEventListener("dblclick", onDblClick);
 
     // Resize observer
     const ro = new ResizeObserver((entries) => {
@@ -474,6 +545,7 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
       mounted = false;
       cancelAnimationFrame(raf);
       ro.disconnect();
+      renderer.domElement.removeEventListener("dblclick", onDblClick);
       controls.dispose();
       // Dispose three resources
       for (const r of Object.values(regionRefs)) {

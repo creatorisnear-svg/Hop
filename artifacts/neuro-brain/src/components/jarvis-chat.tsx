@@ -1,11 +1,14 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import { Bot, Send, Trash2, Maximize2, Minimize2, X, Wrench, CheckCircle2, AlertCircle, Sparkles } from "lucide-react";
+import { Bot, Send, Trash2, Maximize2, Minimize2, X, Wrench, CheckCircle2, AlertCircle, Sparkles, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
+import { speak, stopSpeaking, useVoiceInput } from "@/lib/useVoice";
+
+const VOICE_REPLY_KEY = "jarvis_chat_voice_reply_v1";
 
 interface ToolCall {
   name: string;
@@ -97,8 +100,22 @@ export function JarvisChat() {
   const [pendingTools, setPendingTools] = useState<ToolCall[]>([]);
   const [streamingText, setStreamingText] = useState("");
   const [busy, setBusy] = useState(false);
+  const [voiceReply, setVoiceReply] = useState<boolean>(() => {
+    try { return localStorage.getItem(VOICE_REPLY_KEY) === "1"; } catch { return false; }
+  });
   const scrollRef = useRef<HTMLDivElement>(null);
   const qc = useQueryClient();
+  const sendRef = useRef<(text?: string) => void>(() => {});
+
+  // Voice input — when a final transcript arrives, auto-send it.
+  const voice = useVoiceInput((finalText) => {
+    sendRef.current(finalText);
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem(VOICE_REPLY_KEY, voiceReply ? "1" : "0"); } catch {}
+    if (!voiceReply) stopSpeaking();
+  }, [voiceReply]);
 
   useEffect(() => {
     try {
@@ -134,9 +151,11 @@ export function JarvisChat() {
     scrollToBottom();
   }, [messages, pendingTools, streamingText, scrollToBottom]);
 
-  const send = useCallback(async () => {
-    const text = draft.trim();
+  const send = useCallback(async (override?: string) => {
+    const text = (override ?? draft).trim();
     if (!text || busy) return;
+    if (voice.listening) voice.stop();
+    if (voiceReply) stopSpeaking();
     setBusy(true);
     setDraft("");
     setPendingTools([]);
@@ -197,9 +216,13 @@ export function JarvisChat() {
           } else if (evtType === "assistant_text") {
             setStreamingText(payload.text ?? "");
           } else if (evtType === "done") {
-            setMessages((m) => [...m, payload.message as ChatMessage]);
+            const finalMsg = payload.message as ChatMessage;
+            setMessages((m) => [...m, finalMsg]);
             setPendingTools([]);
             setStreamingText("");
+            if (voiceReply && finalMsg.content) {
+              speak(finalMsg.content);
+            }
           } else if (evtType === "error") {
             setMessages((m) => [
               ...m,
@@ -228,7 +251,12 @@ export function JarvisChat() {
       setPendingTools([]);
       setStreamingText("");
     }
-  }, [draft, busy, qc]);
+  }, [draft, busy, qc, voice, voiceReply]);
+
+  // Keep ref in sync so the voice-input callback always calls the latest send.
+  useEffect(() => {
+    sendRef.current = (text?: string) => { void send(text); };
+  }, [send]);
 
   const clearHistory = useCallback(async () => {
     if (!confirm("Clear all Jarvis chat history?")) return;
@@ -297,14 +325,14 @@ export function JarvisChat() {
               <Bot className="w-10 h-10 mx-auto text-primary/60" />
               <div className="font-medium text-foreground">Hi, I'm Jarvis.</div>
               <div className="text-xs px-4">
-                I can run the brain, change region configs, tune modulators, generate images, remember things, and write new tools. Just tell me what you want.
+                Talk to me — by typing or by voice. I'll answer myself for chat. Ask me to "start a run on X" if you want to wake the full brain.
               </div>
               <div className="flex flex-wrap gap-1 justify-center pt-2 px-2">
                 {[
-                  "Start a run on photosynthesis",
-                  "List my regions",
-                  "Generate a logo",
+                  "How are you, Jarvis?",
+                  "Explain how my brain regions work",
                   "What runs have I done?",
+                  "Start a run on the future of AI",
                 ].map((s) => (
                   <Badge
                     key={s}
@@ -347,7 +375,41 @@ export function JarvisChat() {
       </ScrollArea>
 
       <div className="border-t border-border p-2.5">
-        <div className="flex gap-2 items-end">
+        {voice.listening && (
+          <div className="mb-1.5 flex items-center gap-2 text-xs text-primary px-1">
+            <span className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full rounded-full bg-primary opacity-75 animate-ping" />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
+            </span>
+            <span className="truncate">
+              {voice.transcript || "Listening..."}
+            </span>
+          </div>
+        )}
+        <div className="flex gap-1.5 items-end">
+          {voice.supported && (
+            <Button
+              type="button"
+              size="icon"
+              variant={voice.listening ? "default" : "outline"}
+              className={cn("shrink-0", voice.listening && "animate-pulse")}
+              onClick={() => (voice.listening ? voice.stop() : voice.start())}
+              disabled={busy}
+              title={voice.listening ? "Stop listening" : "Talk to Jarvis"}
+            >
+              {voice.listening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+            </Button>
+          )}
+          <Button
+            type="button"
+            size="icon"
+            variant={voiceReply ? "default" : "outline"}
+            className="shrink-0"
+            onClick={() => setVoiceReply((v) => !v)}
+            title={voiceReply ? "Voice replies on" : "Voice replies off"}
+          >
+            {voiceReply ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+          </Button>
           <Textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -357,12 +419,12 @@ export function JarvisChat() {
                 void send();
               }
             }}
-            placeholder="Tell Jarvis what to do..."
+            placeholder={voice.listening ? "Listening..." : "Talk to Jarvis..."}
             rows={1}
             className="min-h-9 max-h-32 resize-none text-sm"
             disabled={busy}
           />
-          <Button onClick={() => void send()} disabled={busy || !draft.trim()} size="icon">
+          <Button onClick={() => void send()} disabled={busy || !draft.trim()} size="icon" className="shrink-0">
             <Send className="w-4 h-4" />
           </Button>
         </div>
