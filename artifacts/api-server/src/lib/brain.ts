@@ -1,18 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { db, regionsTable, runsTable, messagesTable, type RegionRow } from "@workspace/db";
-import { eq, desc, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { ollamaChat, type OllamaChatMessage } from "./ollama";
 import { brainBus } from "./eventBus";
 import { logger } from "./logger";
-
-const ROLE_TO_KEY: Record<string, string> = {
-  researcher: "sensory_cortex",
-  planner: "association_cortex",
-  executor: "prefrontal_cortex",
-  memory: "hippocampus",
-  critic: "cerebellum",
-  summarizer: "motor_cortex",
-};
+import { jarvisPlan, jarvisSynthesize, type JarvisPlan, type RegionKey } from "./jarvis";
 
 const cancelled = new Set<string>();
 
@@ -27,15 +19,10 @@ async function loadRegions(): Promise<Record<string, RegionRow>> {
   return byKey;
 }
 
-function regionByRole(regions: Record<string, RegionRow>, role: string): RegionRow | null {
-  const key = ROLE_TO_KEY[role];
-  if (!key) return null;
-  return regions[key] ?? null;
-}
-
 async function recordMessage(
   runId: string,
-  region: RegionRow,
+  region: string,
+  role: string,
   iteration: number,
   content: string,
   latencyMs: number,
@@ -45,8 +32,8 @@ async function recordMessage(
   await db.insert(messagesTable).values({
     id,
     runId,
-    region: region.key,
-    role: region.role,
+    region,
+    role,
     content,
     iteration,
     latencyMs,
@@ -58,8 +45,8 @@ async function recordMessage(
     payload: {
       id,
       runId,
-      region: region.key,
-      role: region.role,
+      region,
+      role,
       content,
       iteration,
       latencyMs,
@@ -76,7 +63,7 @@ async function callRegion(
 ): Promise<string> {
   if (!region.enabled) {
     const skip = `[${region.name} disabled — skipped]`;
-    await recordMessage(runId, region, iteration, skip, 0);
+    await recordMessage(runId, region.key, region.role, iteration, skip, 0);
     return skip;
   }
   if (!region.ollamaUrl) {
@@ -94,21 +81,8 @@ async function callRegion(
     messages,
     temperature: region.temperature,
   });
-  await recordMessage(runId, region, iteration, result.content, result.latencyMs);
+  await recordMessage(runId, region.key, region.role, iteration, result.content, result.latencyMs);
   return result.content;
-}
-
-async function fetchPriorMemory(currentRunId: string, goal: string): Promise<string> {
-  const prior = await db
-    .select({ goal: runsTable.goal, finalAnswer: runsTable.finalAnswer })
-    .from(runsTable)
-    .where(sql`${runsTable.status} = 'succeeded' AND ${runsTable.id} <> ${currentRunId}`)
-    .orderBy(desc(runsTable.completedAt))
-    .limit(5);
-  if (prior.length === 0) return "No prior memories available.";
-  return prior
-    .map((p, i) => `Memory ${i + 1}:\nGoal: ${p.goal}\nOutcome: ${(p.finalAnswer ?? "").slice(0, 400)}`)
-    .join("\n\n");
 }
 
 async function setRunStatus(
@@ -125,98 +99,85 @@ async function setRunStatus(
   brainBus.emitRun(runId, { type: "status", runId, payload: patch });
 }
 
+function formatPlanMessage(plan: JarvisPlan): string {
+  const lines = [
+    `**Reasoning:** ${plan.reasoning}`,
+    "",
+    "**Planned sequence:**",
+    ...plan.steps.map((s, i) => `${i + 1}. \`${s.region}\` — ${s.instruction}`),
+  ];
+  return lines.join("\n");
+}
+
 export async function runBrain(runId: string, goal: string, maxIterations: number) {
+  const checkCancel = () => {
+    if (cancelled.has(runId)) {
+      cancelled.delete(runId);
+      throw new Error("__CANCELLED__");
+    }
+  };
+
   try {
     await setRunStatus(runId, { status: "running" });
     const regions = await loadRegions();
 
-    const sensory = regionByRole(regions, "researcher")!;
-    const association = regionByRole(regions, "planner")!;
-    const hippocampus = regionByRole(regions, "memory")!;
-    const prefrontal = regionByRole(regions, "executor")!;
-    const cerebellum = regionByRole(regions, "critic")!;
-    const motor = regionByRole(regions, "summarizer")!;
-
-    const checkCancel = () => {
-      if (cancelled.has(runId)) {
-        cancelled.delete(runId);
-        throw new Error("__CANCELLED__");
-      }
-    };
-
-    // 1. Sensory Cortex — observe
+    // ----- Jarvis plans the run -----
     checkCancel();
-    const observations = await callRegion(
+    const planStart = Date.now();
+    const plan = await jarvisPlan(goal);
+    await recordMessage(
       runId,
-      sensory,
+      "jarvis",
+      "coordinator",
       0,
-      `Goal: ${goal}\n\nProvide your observations.`,
+      formatPlanMessage(plan),
+      Date.now() - planStart,
     );
 
-    // 2. Association Cortex — plan
-    checkCancel();
-    const plan = await callRegion(
-      runId,
-      association,
-      0,
-      `Goal: ${goal}\n\nObservations:\n${observations}\n\nProduce the plan.`,
-    );
+    // Cap to maxIterations as a safety rail (each step counts as one)
+    const cappedSteps = plan.steps.slice(0, Math.max(maxIterations, plan.steps.length));
 
-    // 3. Hippocampus — recall
-    checkCancel();
-    const memoryDump = await fetchPriorMemory(runId, goal);
-    const memory = await callRegion(
-      runId,
-      hippocampus,
-      0,
-      `Goal: ${goal}\n\nPlan:\n${plan}\n\nPrior runs:\n${memoryDump}`,
-    );
-
-    // 4. Loop: Prefrontal -> Cerebellum until APPROVED or max iterations
-    let lastOutput = "";
-    let lastCritique = "";
-    let approved = false;
-    let iter = 1;
-    for (; iter <= maxIterations; iter++) {
+    // ----- Execute the planned sequence -----
+    const synthInputs: { region: RegionKey; instruction: string; output: string }[] = [];
+    let priorContext = "";
+    let stepIndex = 0;
+    for (const step of cappedSteps) {
       checkCancel();
-      const execPrompt =
-        `Goal: ${goal}\n\nPlan:\n${plan}\n\nRelevant memory:\n${memory}` +
-        (lastCritique
-          ? `\n\nPrior attempt was REJECTED with this critique. Address every point:\n${lastCritique}\n\nPrior attempt:\n${lastOutput}`
-          : "");
-      lastOutput = await callRegion(runId, prefrontal, iter, execPrompt);
-
-      checkCancel();
-      const critique = await callRegion(
-        runId,
-        cerebellum,
-        iter,
-        `Goal: ${goal}\n\nExecutor output:\n${lastOutput}`,
-      );
-      lastCritique = critique;
-      await db.update(runsTable).set({ iterations: iter }).where(eq(runsTable.id, runId));
-
-      if (/^\s*VERDICT:\s*APPROVED/im.test(critique)) {
-        approved = true;
-        break;
+      stepIndex += 1;
+      const region = regions[step.region];
+      if (!region) {
+        const msg = `[Jarvis] Region ${step.region} not found in DB — skipping.`;
+        await recordMessage(runId, "jarvis", "coordinator", stepIndex, msg, 0);
+        continue;
       }
+      const prompt =
+        `Goal: ${goal}\n\nJarvis instruction for you: ${step.instruction}` +
+        (priorContext ? `\n\nWhat earlier regions produced:\n${priorContext}` : "");
+      const output = await callRegion(runId, region, stepIndex, prompt);
+      synthInputs.push({ region: step.region, instruction: step.instruction, output });
+      priorContext +=
+        (priorContext ? "\n\n" : "") + `[${step.region}] ${output.slice(0, 1200)}`;
+      await db.update(runsTable).set({ iterations: stepIndex }).where(eq(runsTable.id, runId));
     }
 
-    // 5. Motor Cortex — final
+    // ----- Jarvis synthesizes the final answer -----
     checkCancel();
-    const finalAnswer = await callRegion(
+    const synthStart = Date.now();
+    const finalAnswer = await jarvisSynthesize(goal, synthInputs);
+    await recordMessage(
       runId,
-      motor,
-      iter,
-      `Goal: ${goal}\n\nApproved output:\n${lastOutput}` +
-        (approved ? "" : "\n\nNote: Max iterations reached without explicit approval. Deliver the best available answer."),
+      "jarvis",
+      "coordinator",
+      stepIndex + 1,
+      finalAnswer,
+      Date.now() - synthStart,
     );
 
     const completedAt = new Date();
     await setRunStatus(runId, {
       status: "succeeded",
       finalAnswer,
-      iterations: Math.min(iter, maxIterations),
+      iterations: stepIndex,
       completedAt,
     });
     brainBus.emitRun(runId, { type: "done", runId, payload: { finalAnswer } });
@@ -233,7 +194,16 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
   }
 }
 
-export async function ensureRegionsSeeded(defaults: { key: string; role: string; name: string; description: string; systemPrompt: string; temperature: number }[]) {
+export async function ensureRegionsSeeded(
+  defaults: {
+    key: string;
+    role: string;
+    name: string;
+    description: string;
+    systemPrompt: string;
+    temperature: number;
+  }[],
+) {
   const existing = await db.select({ key: regionsTable.key }).from(regionsTable);
   const have = new Set(existing.map((r) => r.key));
   const toInsert = defaults.filter((d) => !have.has(d.key));

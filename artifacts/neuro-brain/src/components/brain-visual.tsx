@@ -12,6 +12,7 @@ interface BrainVisualProps {
 }
 
 const REGION_COLORS: Record<string, number> = {
+  jarvis: 0xffffff,
   sensory_cortex: 0x00e5ff,
   association_cortex: 0xff8800,
   hippocampus: 0x00ff88,
@@ -21,6 +22,7 @@ const REGION_COLORS: Record<string, number> = {
 };
 
 const REGION_LABELS: Record<string, string> = {
+  jarvis: "JARVIS",
   sensory_cortex: "SENSORY",
   association_cortex: "ASSOCIATION",
   hippocampus: "HIPPOCAMPUS",
@@ -30,24 +32,28 @@ const REGION_LABELS: Record<string, string> = {
 };
 
 const REGION_LAYOUT: Record<string, { x: number; y: number; z: number }> = {
-  prefrontal_cortex: { x: -0.7, y: 0.85, z: 0.0 },
-  motor_cortex: { x: 0.6, y: 0.85, z: 0.2 },
-  sensory_cortex: { x: 1.0, y: 0.0, z: 0.4 },
-  association_cortex: { x: -0.2, y: 0.1, z: 0.0 },
-  hippocampus: { x: -0.6, y: -0.5, z: 0.2 },
-  cerebellum: { x: 0.4, y: -0.7, z: -0.1 },
+  jarvis: { x: 0.0, y: 0.1, z: 0.0 },
+  prefrontal_cortex: { x: -0.85, y: 0.9, z: 0.1 },
+  motor_cortex: { x: 0.85, y: 0.9, z: 0.1 },
+  sensory_cortex: { x: 1.1, y: -0.05, z: 0.4 },
+  association_cortex: { x: -1.1, y: -0.05, z: 0.4 },
+  hippocampus: { x: -0.55, y: -0.85, z: 0.2 },
+  cerebellum: { x: 0.55, y: -0.85, z: 0.2 },
 };
 
+// Jarvis is the hub — all regions connect through it.
 const CONNECTIONS: [string, string][] = [
+  ["jarvis", "sensory_cortex"],
+  ["jarvis", "association_cortex"],
+  ["jarvis", "hippocampus"],
+  ["jarvis", "prefrontal_cortex"],
+  ["jarvis", "cerebellum"],
+  ["jarvis", "motor_cortex"],
   ["sensory_cortex", "association_cortex"],
-  ["association_cortex", "hippocampus"],
   ["association_cortex", "prefrontal_cortex"],
-  ["hippocampus", "prefrontal_cortex"],
   ["prefrontal_cortex", "cerebellum"],
-  ["cerebellum", "prefrontal_cortex"],
   ["prefrontal_cortex", "motor_cortex"],
-  ["sensory_cortex", "prefrontal_cortex"],
-  ["hippocampus", "motor_cortex"],
+  ["hippocampus", "prefrontal_cortex"],
 ];
 
 function createNeuronTexture(): THREE.CanvasTexture {
@@ -188,8 +194,9 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
 
     for (const [key, layout] of Object.entries(REGION_LAYOUT)) {
       const color = REGION_COLORS[key] ?? 0xffffff;
-      const count = 220;
-      const localPts = generateRegionPoints(count, 0.32);
+      const isHub = key === "jarvis";
+      const count = isHub ? 380 : 220;
+      const localPts = generateRegionPoints(count, isHub ? 0.22 : 0.32);
       const positions = new Float32Array(count * 3);
       for (let i = 0; i < count; i++) {
         positions[i * 3] = localPts[i * 3] + layout.x;
@@ -514,15 +521,18 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
 
 function BrainVisualFallback({ activeRegion, className }: BrainVisualProps) {
   const nodes = [
-    { key: "prefrontal_cortex", label: "PFC", x: 22, y: 28 },
-    { key: "motor_cortex", label: "MC", x: 78, y: 28 },
-    { key: "sensory_cortex", label: "SC", x: 92, y: 55 },
-    { key: "association_cortex", label: "AC", x: 35, y: 55 },
-    { key: "hippocampus", label: "HC", x: 25, y: 80 },
-    { key: "cerebellum", label: "CB", x: 70, y: 80 },
+    { key: "jarvis", label: "JARVIS", x: 50, y: 50 },
+    { key: "prefrontal_cortex", label: "PFC", x: 22, y: 22 },
+    { key: "motor_cortex", label: "MC", x: 78, y: 22 },
+    { key: "sensory_cortex", label: "SC", x: 92, y: 50 },
+    { key: "association_cortex", label: "AC", x: 8, y: 50 },
+    { key: "hippocampus", label: "HC", x: 25, y: 82 },
+    { key: "cerebellum", label: "CB", x: 75, y: 82 },
   ];
+  // 0=jarvis at center; spokes 1..6 + a couple of cross-links
   const edges: [number, number][] = [
-    [0, 1], [0, 3], [1, 2], [2, 3], [3, 4], [3, 5], [0, 4], [1, 5], [4, 5],
+    [0, 1], [0, 2], [0, 3], [0, 4], [0, 5], [0, 6],
+    [4, 1], [3, 2], [1, 5], [2, 6], [5, 6],
   ];
   return (
     <div
