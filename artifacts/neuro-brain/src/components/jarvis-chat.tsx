@@ -1,14 +1,15 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import { Bot, Send, Trash2, Maximize2, Minimize2, X, Wrench, CheckCircle2, AlertCircle, Sparkles, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
+import { Bot, Send, Trash2, Maximize2, Minimize2, X, Wrench, CheckCircle2, AlertCircle, Sparkles, Mic, MicOff, Volume2, VolumeX, Ear, EarOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
-import { speak, stopSpeaking, useVoiceInput } from "@/lib/useVoice";
+import { speak, stopSpeaking, useVoiceInput, useWakeWord } from "@/lib/useVoice";
 
 const VOICE_REPLY_KEY = "jarvis_chat_voice_reply_v1";
+const WAKE_WORD_KEY = "jarvis_chat_wake_word_v1";
 
 interface ToolCall {
   name: string;
@@ -103,19 +104,35 @@ export function JarvisChat() {
   const [voiceReply, setVoiceReply] = useState<boolean>(() => {
     try { return localStorage.getItem(VOICE_REPLY_KEY) === "1"; } catch { return false; }
   });
+  const [wakeEnabled, setWakeEnabled] = useState<boolean>(() => {
+    try { return localStorage.getItem(WAKE_WORD_KEY) === "1"; } catch { return false; }
+  });
+  const [speaking, setSpeaking] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const qc = useQueryClient();
   const sendRef = useRef<(text?: string) => void>(() => {});
 
-  // Voice input — when a final transcript arrives, auto-send it.
+  // Voice input (push-to-talk) — when a final transcript arrives, auto-send it.
   const voice = useVoiceInput((finalText) => {
     sendRef.current(finalText);
+  });
+
+  // Wake-word listener — pause it while Jarvis is busy, push-to-talking, or
+  // currently speaking, to avoid mic feedback or overlap.
+  const wake = useWakeWord({
+    enabled: wakeEnabled && open,
+    paused: busy || voice.listening || speaking,
+    onCommand: (text) => sendRef.current(text),
   });
 
   useEffect(() => {
     try { localStorage.setItem(VOICE_REPLY_KEY, voiceReply ? "1" : "0"); } catch {}
     if (!voiceReply) stopSpeaking();
   }, [voiceReply]);
+
+  useEffect(() => {
+    try { localStorage.setItem(WAKE_WORD_KEY, wakeEnabled ? "1" : "0"); } catch {}
+  }, [wakeEnabled]);
 
   useEffect(() => {
     try {
@@ -221,7 +238,11 @@ export function JarvisChat() {
             setPendingTools([]);
             setStreamingText("");
             if (voiceReply && finalMsg.content) {
-              speak(finalMsg.content);
+              setSpeaking(true);
+              speak(finalMsg.content, {
+                onStart: () => setSpeaking(true),
+                onEnd: () => setSpeaking(false),
+              });
             }
           } else if (evtType === "error") {
             setMessages((m) => [
@@ -375,15 +396,43 @@ export function JarvisChat() {
       </ScrollArea>
 
       <div className="border-t border-border p-2.5">
-        {voice.listening && (
-          <div className="mb-1.5 flex items-center gap-2 text-xs text-primary px-1">
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full rounded-full bg-primary opacity-75 animate-ping" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
-            </span>
-            <span className="truncate">
-              {voice.transcript || "Listening..."}
-            </span>
+        {(voice.listening || (wakeEnabled && wake.supported)) && (
+          <div className="mb-1.5 flex items-center gap-2 text-xs px-1">
+            {voice.listening ? (
+              <>
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full rounded-full bg-primary opacity-75 animate-ping" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
+                </span>
+                <span className="truncate text-primary">{voice.transcript || "Listening..."}</span>
+              </>
+            ) : wake.mode === "command" ? (
+              <>
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full rounded-full bg-green-500 opacity-75 animate-ping" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+                </span>
+                <span className="truncate text-green-500">
+                  {wake.heardCommand || "Yes, sir? Go on..."}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className={cn(
+                  "h-2 w-2 rounded-full",
+                  speaking ? "bg-yellow-500 animate-pulse" : busy ? "bg-yellow-500/50" : wake.listening ? "bg-green-500/70" : "bg-muted-foreground/40",
+                )} />
+                <span className="truncate text-muted-foreground">
+                  {speaking
+                    ? "Speaking…"
+                    : busy
+                      ? "Thinking…"
+                      : wake.listening
+                        ? "Say \"Hey Jarvis\""
+                        : "Wake word paused"}
+                </span>
+              </>
+            )}
           </div>
         )}
         <div className="flex gap-1.5 items-end">
@@ -395,9 +444,21 @@ export function JarvisChat() {
               className={cn("shrink-0", voice.listening && "animate-pulse")}
               onClick={() => (voice.listening ? voice.stop() : voice.start())}
               disabled={busy}
-              title={voice.listening ? "Stop listening" : "Talk to Jarvis"}
+              title={voice.listening ? "Stop listening" : "Talk to Jarvis (push to talk)"}
             >
               {voice.listening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+            </Button>
+          )}
+          {wake.supported && (
+            <Button
+              type="button"
+              size="icon"
+              variant={wakeEnabled ? "default" : "outline"}
+              className="shrink-0"
+              onClick={() => setWakeEnabled((v) => !v)}
+              title={wakeEnabled ? "\"Hey Jarvis\" wake word on" : "Enable hands-free \"Hey Jarvis\""}
+            >
+              {wakeEnabled ? <Ear className="w-4 h-4" /> : <EarOff className="w-4 h-4" />}
             </Button>
           )}
           <Button

@@ -90,7 +90,7 @@ function waitForVoices(): Promise<void> {
   return voicesReadyPromise;
 }
 
-export function speak(text: string, opts: { rate?: number; pitch?: number } = {}): void {
+export function speak(text: string, opts: { rate?: number; pitch?: number; onStart?: () => void; onEnd?: () => void } = {}): void {
   if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
   const stripped = text
     .replace(/```[\s\S]*?```/g, " (code block) ")
@@ -110,6 +110,11 @@ export function speak(text: string, opts: { rate?: number; pitch?: number } = {}
       u.lang = voice.lang;
     } else {
       u.lang = "en-GB";
+    }
+    if (opts.onStart) u.onstart = () => opts.onStart!();
+    if (opts.onEnd) {
+      u.onend = () => opts.onEnd!();
+      u.onerror = () => opts.onEnd!();
     }
     window.speechSynthesis.cancel();
     window.speechSynthesis.speak(u);
@@ -134,6 +139,182 @@ export interface UseVoiceInput {
   transcript: string;
   start: () => void;
   stop: () => void;
+}
+
+export interface UseWakeWord {
+  supported: boolean;
+  listening: boolean;
+  mode: "wake" | "command";
+  heardCommand: string;
+}
+
+/**
+ * Continuously listens for a wake phrase ("hey jarvis", "jarvis", ...).
+ * Once heard, captures the words spoken after it and fires onCommand when the
+ * user pauses. Auto-restarts the underlying recognition session.
+ *
+ * Pauses while `paused` is true (e.g. while Jarvis is speaking) so it doesn't
+ * trigger itself from speaker echo.
+ */
+export function useWakeWord(params: {
+  enabled: boolean;
+  paused?: boolean;
+  onCommand: (text: string) => void;
+  wakePhrases?: string[];
+}): UseWakeWord {
+  const { enabled, paused = false, onCommand } = params;
+  const wakePhrases = (params.wakePhrases ?? ["hey jarvis", "ok jarvis", "okay jarvis", "jarvis"]).map((p) =>
+    p.toLowerCase(),
+  );
+  const SR = getSR();
+  const supported = !!SR;
+
+  const [listening, setListening] = useState(false);
+  const [mode, setMode] = useState<"wake" | "command">("wake");
+  const [heardCommand, setHeardCommand] = useState("");
+
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const restartTimerRef = useRef<number | null>(null);
+  const commandTimerRef = useRef<number | null>(null);
+  const commandTextRef = useRef<string>("");
+  const modeRef = useRef<"wake" | "command">("wake");
+  const onCommandRef = useRef(onCommand);
+  const wantRunningRef = useRef(false);
+
+  useEffect(() => { onCommandRef.current = onCommand; }, [onCommand]);
+
+  const fireCommand = () => {
+    const text = commandTextRef.current.trim();
+    commandTextRef.current = "";
+    setHeardCommand("");
+    modeRef.current = "wake";
+    setMode("wake");
+    if (text) onCommandRef.current(text);
+  };
+
+  const stopRecognition = () => {
+    if (restartTimerRef.current != null) {
+      window.clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
+    if (commandTimerRef.current != null) {
+      window.clearTimeout(commandTimerRef.current);
+      commandTimerRef.current = null;
+    }
+    const r = recognitionRef.current;
+    recognitionRef.current = null;
+    if (r) {
+      try { r.onresult = null; r.onerror = null; r.onend = null; r.stop(); } catch {}
+    }
+    setListening(false);
+  };
+
+  const startRecognition = () => {
+    if (!SR || !wantRunningRef.current) return;
+    if (recognitionRef.current) return;
+    let r: SpeechRecognitionLike;
+    try {
+      r = new SR();
+    } catch {
+      return;
+    }
+    r.lang = "en-US";
+    r.continuous = true;
+    r.interimResults = true;
+    r.onresult = (e: any) => {
+      // Build the most recent transcript chunk (the latest result group)
+      const last = e.results[e.results.length - 1];
+      const chunk: string = (last?.[0]?.transcript ?? "").toString();
+      const isFinal: boolean = !!last?.isFinal;
+      const lower = chunk.toLowerCase();
+
+      if (modeRef.current === "wake") {
+        // Look for any wake phrase in the latest chunk
+        let wakeIdx = -1;
+        let matched = "";
+        for (const phrase of wakePhrases) {
+          const idx = lower.lastIndexOf(phrase);
+          if (idx > wakeIdx) {
+            wakeIdx = idx;
+            matched = phrase;
+          }
+        }
+        if (wakeIdx >= 0) {
+          modeRef.current = "command";
+          setMode("command");
+          // Capture anything spoken AFTER the wake phrase in the same breath
+          const after = chunk.slice(wakeIdx + matched.length).trim();
+          commandTextRef.current = after;
+          setHeardCommand(after);
+          // If the chunk is final and there's already a command, send it
+          if (isFinal && after) {
+            if (commandTimerRef.current != null) window.clearTimeout(commandTimerRef.current);
+            commandTimerRef.current = window.setTimeout(fireCommand, 200);
+          } else {
+            // Otherwise, give the user a moment to say the command
+            if (commandTimerRef.current != null) window.clearTimeout(commandTimerRef.current);
+            commandTimerRef.current = window.setTimeout(() => {
+              if (modeRef.current === "command") fireCommand();
+            }, 5000);
+          }
+        }
+      } else {
+        // We're in command mode — accumulate / replace with the latest chunk
+        commandTextRef.current = chunk.trim();
+        setHeardCommand(commandTextRef.current);
+        if (commandTimerRef.current != null) window.clearTimeout(commandTimerRef.current);
+        if (isFinal) {
+          commandTimerRef.current = window.setTimeout(fireCommand, 250);
+        } else {
+          commandTimerRef.current = window.setTimeout(fireCommand, 1800);
+        }
+      }
+    };
+    r.onerror = () => {
+      // Will be auto-restarted by onend
+    };
+    r.onend = () => {
+      recognitionRef.current = null;
+      setListening(false);
+      if (wantRunningRef.current) {
+        // Brief delay before restarting to avoid tight loops
+        if (restartTimerRef.current != null) window.clearTimeout(restartTimerRef.current);
+        restartTimerRef.current = window.setTimeout(() => {
+          restartTimerRef.current = null;
+          startRecognition();
+        }, 300);
+      }
+    };
+    try {
+      r.start();
+      recognitionRef.current = r;
+      setListening(true);
+    } catch {
+      // Probably already started elsewhere — bail
+    }
+  };
+
+  useEffect(() => {
+    wantRunningRef.current = enabled && !paused;
+    if (!supported) return;
+    if (enabled && !paused) {
+      startRecognition();
+    } else {
+      stopRecognition();
+      // Reset state so the next session starts in wake mode
+      modeRef.current = "wake";
+      setMode("wake");
+      commandTextRef.current = "";
+      setHeardCommand("");
+    }
+    return () => {
+      wantRunningRef.current = false;
+      stopRecognition();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, paused, supported]);
+
+  return { supported, listening, mode, heardCommand };
 }
 
 export function useVoiceInput(onFinal: (text: string) => void): UseVoiceInput {
