@@ -2,6 +2,7 @@ import { db, runsTable, insightsTable, type InsightRow } from "@workspace/db";
 import { desc, eq, gt } from "drizzle-orm";
 import { ai } from "@workspace/integrations-gemini-ai";
 import { logger } from "./logger";
+import { fireWebhookEvent } from "./webhooks";
 
 const MODEL = "gemini-2.5-flash";
 
@@ -103,13 +104,27 @@ export async function consolidate(opts: { force?: boolean } = {}): Promise<{
     );
 
     if (insights.length > 0) {
-      await db.insert(insightsTable).values(
-        insights.map((i) => ({
-          kind: ["pattern", "lesson", "preference"].includes(i.kind) ? i.kind : "lesson",
-          content: i.content.slice(0, 500),
-          sourceRunIds: succeeded.map((r) => r.id),
-        })),
-      );
+      const inserted = await db
+        .insert(insightsTable)
+        .values(
+          insights.map((i) => ({
+            kind: ["pattern", "lesson", "preference"].includes(i.kind) ? i.kind : "lesson",
+            content: i.content.slice(0, 500),
+            sourceRunIds: succeeded.map((r) => r.id),
+          })),
+        )
+        .returning();
+      for (const row of inserted) {
+        fireWebhookEvent({
+          event: "insight.created",
+          data: {
+            id: row.id,
+            kind: row.kind,
+            content: row.content,
+            sourceRunIds: row.sourceRunIds,
+          },
+        });
+      }
     }
 
     status.lastSleepAt = Date.now();

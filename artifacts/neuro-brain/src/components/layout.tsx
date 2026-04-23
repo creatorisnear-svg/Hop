@@ -1,6 +1,6 @@
 import React from "react";
 import { Link, useLocation } from "wouter";
-import { Activity, Brain, Network, Play, LayoutDashboard, Settings, Zap, Wrench, Moon, Sparkles } from "lucide-react";
+import { Activity, Brain, Network, Play, LayoutDashboard, Settings, Zap, Wrench, Moon, Sparkles, Webhook, Puzzle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface LayoutProps {
@@ -18,6 +18,8 @@ export function Layout({ children }: LayoutProps) {
     { href: "/tools", label: "Tools", icon: Wrench },
     { href: "/sleep", label: "Sleep", icon: Moon },
     { href: "/modulators", label: "Modulators", icon: Sparkles },
+    { href: "/webhooks", label: "Webhooks", icon: Webhook },
+    { href: "/plugins", label: "Plugins", icon: Puzzle },
     { href: "/regions", label: "Regions Config", icon: Settings },
   ];
 

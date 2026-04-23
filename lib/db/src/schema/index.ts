@@ -4,3 +4,4 @@ export * from "./messages";
 export * from "./synapses";
 export * from "./insights";
 export * from "./modulators";
+export * from "./webhooks";

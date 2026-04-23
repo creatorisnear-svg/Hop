@@ -9,6 +9,7 @@ import { planningHint, reinforcePath } from "./synapses";
 import { invokeTool } from "./tools";
 import { noteRunActivity } from "./sleep";
 import { getModulators, effectiveTemperature, effectiveMaxSteps } from "./modulators";
+import { fireWebhookEvent } from "./webhooks";
 
 const cancelled = new Set<string>();
 
@@ -125,6 +126,7 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
   try {
     noteRunActivity();
     await setRunStatus(runId, { status: "running" });
+    fireWebhookEvent({ event: "run.started", data: { runId, goal } });
     const regions = await loadRegions();
 
     // ----- Jarvis plans the run (with synapse hints from prior runs) -----
@@ -217,6 +219,10 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
       iterations: stepIndex,
       completedAt,
     });
+    fireWebhookEvent({
+      event: "run.succeeded",
+      data: { runId, goal, finalAnswer, iterations: stepIndex },
+    });
 
     // ----- Reinforce the synapses that fired in this successful run -----
     try {
@@ -234,11 +240,13 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
     const message = err instanceof Error ? err.message : String(err);
     if (message === "__CANCELLED__") {
       await setRunStatus(runId, { status: "cancelled", completedAt: new Date() });
+      fireWebhookEvent({ event: "run.cancelled", data: { runId, goal } });
       brainBus.emitRun(runId, { type: "done", runId, payload: { cancelled: true } });
       return;
     }
     logger.error({ err, runId }, "brain run failed");
     await setRunStatus(runId, { status: "failed", error: message, completedAt: new Date() });
+    fireWebhookEvent({ event: "run.failed", data: { runId, goal, error: message } });
     brainBus.emitRun(runId, { type: "error", runId, payload: { error: message } });
   }
 }

@@ -4,6 +4,7 @@ import { ensureRegionsSeeded } from "./lib/brain";
 import { REGION_DEFAULTS } from "./lib/regionDefaults";
 import { registerBuiltinTools } from "./lib/tools/builtins";
 import { startSleepScheduler } from "./lib/sleep";
+import { loadPlugins } from "./lib/plugins";
 
 const rawPort = process.env["PORT"];
 
@@ -29,6 +30,13 @@ async function main() {
 
   registerBuiltinTools();
   logger.info("Built-in agent tools registered");
+
+  try {
+    const plugins = await loadPlugins();
+    logger.info({ count: plugins.length, ok: plugins.filter((p) => p.ok).length }, "Plugins loaded");
+  } catch (err) {
+    logger.warn({ err }, "Plugin loader failed");
+  }
 
   startSleepScheduler();
   logger.info("Sleep/consolidation scheduler started");

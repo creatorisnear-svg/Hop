@@ -7,6 +7,8 @@ import synapsesRouter from "./synapses";
 import toolsRouter from "./tools";
 import sleepRouter from "./sleep";
 import modulatorsRouter from "./modulators";
+import webhooksRouter from "./webhooks";
+import pluginsRouter from "./plugins";
 
 const router: IRouter = Router();
 
@@ -18,5 +20,7 @@ router.use(synapsesRouter);
 router.use(toolsRouter);
 router.use(sleepRouter);
 router.use(modulatorsRouter);
+router.use(webhooksRouter);
+router.use(pluginsRouter);
 
 export default router;

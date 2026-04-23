@@ -425,6 +425,87 @@ export const RunSleepResponse = zod.object({
 });
 
 /**
+ * @summary List webhooks and supported events
+ */
+export const ListWebhooksResponse = zod.object({
+  events: zod.array(zod.string()),
+  webhooks: zod.array(
+    zod.object({
+      id: zod.string(),
+      url: zod.string(),
+      events: zod.array(zod.string()),
+      enabled: zod.boolean(),
+      hasSecret: zod.boolean(),
+      createdAt: zod.coerce.date(),
+      lastFiredAt: zod.coerce.date().nullish(),
+      lastStatus: zod.number().nullish(),
+      lastError: zod.string().nullish(),
+    }),
+  ),
+});
+
+/**
+ * @summary Register a new webhook
+ */
+export const CreateWebhookBody = zod.object({
+  url: zod.string(),
+  events: zod.array(zod.string()),
+  secret: zod.string().optional(),
+  enabled: zod.boolean().optional(),
+});
+
+export const DeleteWebhookParams = zod.object({
+  id: zod.coerce.string(),
+});
+
+export const UpdateWebhookParams = zod.object({
+  id: zod.coerce.string(),
+});
+
+export const UpdateWebhookBody = zod.object({
+  enabled: zod.boolean().optional(),
+});
+
+export const TestWebhookParams = zod.object({
+  id: zod.coerce.string(),
+});
+
+export const TestWebhookResponse = zod.object({
+  ok: zod.boolean().optional(),
+  error: zod.string().optional(),
+});
+
+/**
+ * @summary List loaded plugin files and the tools they registered
+ */
+export const ListPluginsResponse = zod.object({
+  dir: zod.string(),
+  plugins: zod.array(
+    zod.object({
+      file: zod.string(),
+      ok: zod.boolean(),
+      toolsAdded: zod.array(zod.string()),
+      error: zod.string().optional(),
+    }),
+  ),
+});
+
+/**
+ * @summary Re-scan the plugins directory and load any new files
+ */
+export const ReloadPluginsResponse = zod.object({
+  dir: zod.string(),
+  plugins: zod.array(
+    zod.object({
+      file: zod.string(),
+      ok: zod.boolean(),
+      toolsAdded: zod.array(zod.string()),
+      error: zod.string().optional(),
+    }),
+  ),
+});
+
+/**
  * @summary Read current global neuromodulator state
  */
 export const getModulatorsResponseFocusMin = 0;

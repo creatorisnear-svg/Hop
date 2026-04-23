@@ -228,8 +228,53 @@ export interface ModulatorsPatch {
   curiosity?: number;
 }
 
+export interface Webhook {
+  id: string;
+  url: string;
+  events: string[];
+  enabled: boolean;
+  hasSecret: boolean;
+  createdAt: string;
+  lastFiredAt?: string | null;
+  lastStatus?: number | null;
+  lastError?: string | null;
+}
+
+export interface WebhookCreate {
+  url: string;
+  events: string[];
+  secret?: string;
+  enabled?: boolean;
+}
+
+export interface WebhookList {
+  events: string[];
+  webhooks: Webhook[];
+}
+
+export interface LoadedPlugin {
+  file: string;
+  ok: boolean;
+  toolsAdded: string[];
+  error?: string;
+}
+
+export interface PluginList {
+  dir: string;
+  plugins: LoadedPlugin[];
+}
+
 export type ListRunsParams = {
   limit?: number;
 };
 
 export type InvokeToolBody = { [key: string]: unknown };
+
+export type UpdateWebhookBody = {
+  enabled?: boolean;
+};
+
+export type TestWebhook200 = {
+  ok?: boolean;
+  error?: string;
+};

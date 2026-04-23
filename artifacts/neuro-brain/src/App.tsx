@@ -14,6 +14,8 @@ import SynapsesPage from "@/pages/synapses";
 import ToolsPage from "@/pages/tools";
 import SleepPage from "@/pages/sleep";
 import ModulatorsPage from "@/pages/modulators";
+import WebhooksPage from "@/pages/webhooks";
+import PluginsPage from "@/pages/plugins";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -35,6 +37,8 @@ function Router() {
       <Route path="/tools" component={ToolsPage} />
       <Route path="/sleep" component={SleepPage} />
       <Route path="/modulators" component={ModulatorsPage} />
+      <Route path="/webhooks" component={WebhooksPage} />
+      <Route path="/plugins" component={PluginsPage} />
       <Route component={NotFound} />
     </Switch>
   );
