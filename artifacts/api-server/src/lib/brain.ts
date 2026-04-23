@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { groqChat, type GroqChatMessage } from "./groq";
 import { brainBus } from "./eventBus";
 import { logger } from "./logger";
-import { jarvisPlan, jarvisSynthesize, type JarvisPlan, type RegionKey } from "./jarvis";
+import { jarvisPlan, jarvisSynthesize, type JarvisPlan, type JarvisStep, type RegionKey } from "./jarvis";
 import { planningHint, reinforcePath } from "./synapses";
 import { invokeTool } from "./tools";
 import { noteRunActivity } from "./sleep";
@@ -15,6 +15,36 @@ const cancelled = new Set<string>();
 
 export function requestCancel(runId: string) {
   cancelled.add(runId);
+}
+
+// ----- Mid-run plan adjustments -----
+// Steps queued with injectStep() are appended after the currently-executing step.
+// replaceUpcomingSteps() wipes any remaining planned steps and replaces them.
+const adjustments = new Map<string, JarvisStep[]>();
+const replacements = new Map<string, JarvisStep[] | null>(); // null = "replace upcoming with []"
+const activeRuns = new Set<string>();
+
+export function injectStep(runId: string, step: JarvisStep) {
+  if (!activeRuns.has(runId)) throw new Error("run is not currently executing");
+  const list = adjustments.get(runId) ?? [];
+  list.push(step);
+  adjustments.set(runId, list);
+}
+
+export function replaceUpcomingSteps(runId: string, steps: JarvisStep[]) {
+  if (!activeRuns.has(runId)) throw new Error("run is not currently executing");
+  replacements.set(runId, steps);
+}
+
+export function getPendingAdjustments(runId: string): { injected: JarvisStep[]; replacement: JarvisStep[] | null } {
+  return {
+    injected: adjustments.get(runId) ?? [],
+    replacement: replacements.get(runId) ?? null,
+  };
+}
+
+export function isRunActive(runId: string): boolean {
+  return activeRuns.has(runId);
 }
 
 async function loadRegions(): Promise<Record<string, RegionRow>> {
@@ -142,14 +172,17 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
     const adjustedMax = effectiveMaxSteps(maxIterations, mods);
 
     // Cap to adjusted max as a safety rail (each step counts as one)
-    const cappedSteps = plan.steps.slice(0, Math.max(adjustedMax, plan.steps.length));
+    let queue: JarvisStep[] = plan.steps.slice(0, Math.max(adjustedMax, plan.steps.length));
+
+    activeRuns.add(runId);
 
     // ----- Execute the planned sequence -----
     const synthInputs: { region: RegionKey; instruction: string; output: string }[] = [];
     let priorContext = "";
     let stepIndex = 0;
-    for (const step of cappedSteps) {
+    while (queue.length > 0) {
       checkCancel();
+      const step = queue.shift()!;
       stepIndex += 1;
 
       // ----- Tool step: skip the LLM, run a registered tool -----
@@ -191,7 +224,45 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
       priorContext +=
         (priorContext ? "\n\n" : "") + `[${step.region}] ${output.slice(0, 1200)}`;
       await db.update(runsTable).set({ iterations: stepIndex }).where(eq(runsTable.id, runId));
+
+      // Apply mid-run adjustments queued by Jarvis chat or external callers
+      const replacement = replacements.get(runId);
+      if (replacement !== undefined) {
+        queue = replacement ?? [];
+        replacements.delete(runId);
+        if (queue.length > 0) {
+          await recordMessage(
+            runId,
+            "jarvis",
+            "coordinator",
+            stepIndex,
+            `[Jarvis] Plan rewritten mid-run. New upcoming steps:\n${queue
+              .map((s, i) => `${i + 1}. \`${s.region}\` — ${s.instruction}`)
+              .join("\n")}`,
+            0,
+          );
+        }
+      }
+      const injected = adjustments.get(runId);
+      if (injected && injected.length > 0) {
+        queue.unshift(...injected);
+        adjustments.delete(runId);
+        await recordMessage(
+          runId,
+          "jarvis",
+          "coordinator",
+          stepIndex,
+          `[Jarvis] Injected ${injected.length} new step(s):\n${injected
+            .map((s, i) => `${i + 1}. \`${s.region}\` — ${s.instruction}`)
+            .join("\n")}`,
+          0,
+        );
+      }
     }
+
+    activeRuns.delete(runId);
+    adjustments.delete(runId);
+    replacements.delete(runId);
 
     // ----- Jarvis synthesizes the final answer -----
     checkCancel();
@@ -231,6 +302,9 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
 
     brainBus.emitRun(runId, { type: "done", runId, payload: { finalAnswer } });
   } catch (err) {
+    activeRuns.delete(runId);
+    adjustments.delete(runId);
+    replacements.delete(runId);
     const message = err instanceof Error ? err.message : String(err);
     if (message === "__CANCELLED__") {
       await setRunStatus(runId, { status: "cancelled", completedAt: new Date() });

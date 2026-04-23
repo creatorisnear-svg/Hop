@@ -9,6 +9,10 @@ import sleepRouter from "./sleep";
 import modulatorsRouter from "./modulators";
 import webhooksRouter from "./webhooks";
 import pluginsRouter from "./plugins";
+import jarvisChatRouter from "./jarvisChat";
+import jarvisMemoryRouter from "./jarvisMemory";
+import imagesRouter from "./images";
+import keysRouter from "./keys";
 
 const router: IRouter = Router();
 
@@ -22,5 +26,9 @@ router.use(sleepRouter);
 router.use(modulatorsRouter);
 router.use(webhooksRouter);
 router.use(pluginsRouter);
+router.use(jarvisChatRouter);
+router.use(jarvisMemoryRouter);
+router.use(imagesRouter);
+router.use(keysRouter);
 
 export default router;

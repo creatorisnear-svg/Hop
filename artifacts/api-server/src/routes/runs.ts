@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { db, runsTable, messagesTable, type RunRow, type MessageRow } from "@workspace/db";
 import { eq, desc } from "drizzle-orm";
 import { CreateRunBody, ListRunsQueryParams, GetRunParams, CancelRunParams } from "@workspace/api-zod";
-import { runBrain, requestCancel } from "../lib/brain";
+import { runBrain, requestCancel, injectStep, replaceUpcomingSteps, getPendingAdjustments, isRunActive } from "../lib/brain";
+import type { RegionKey } from "../lib/jarvis";
 import { brainBus, type BrainEvent } from "../lib/eventBus";
 
 const router: IRouter = Router();
@@ -75,6 +76,36 @@ router.post("/runs/:runId/cancel", async (req, res) => {
   if (!run) return res.status(404).json({ error: "Run not found" });
   requestCancel(runId);
   res.json(summarize(run));
+});
+
+router.post("/runs/:runId/adjust", async (req, res) => {
+  const { runId } = GetRunParams.parse(req.params);
+  if (!isRunActive(runId)) return res.status(409).json({ error: "Run is not currently executing" });
+  const body = (req.body ?? {}) as {
+    inject?: { region: string; instruction: string }[];
+    replace?: { region: string; instruction: string }[];
+  };
+  try {
+    if (Array.isArray(body.replace)) {
+      replaceUpcomingSteps(
+        runId,
+        body.replace.map((s) => ({ region: s.region as RegionKey, instruction: s.instruction })),
+      );
+    }
+    if (Array.isArray(body.inject)) {
+      for (const s of body.inject) {
+        injectStep(runId, { region: s.region as RegionKey, instruction: s.instruction });
+      }
+    }
+    res.json({ ok: true, pending: getPendingAdjustments(runId) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+router.get("/runs/:runId/adjust", async (req, res) => {
+  const { runId } = GetRunParams.parse(req.params);
+  res.json({ active: isRunActive(runId), pending: getPendingAdjustments(runId) });
 });
 
 router.get("/runs/:runId/stream", async (req, res) => {

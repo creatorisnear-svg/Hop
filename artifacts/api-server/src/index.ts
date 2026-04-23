@@ -5,6 +5,8 @@ import { REGION_DEFAULTS } from "./lib/regionDefaults";
 import { registerBuiltinTools } from "./lib/tools/builtins";
 import { startSleepScheduler } from "./lib/sleep";
 import { loadPlugins } from "./lib/plugins";
+import { runStartupKeyCheck } from "./lib/keysHealth";
+import "./lib/jarvisTools"; // register tool catalog at boot
 
 const rawPort = process.env["PORT"];
 
@@ -40,6 +42,9 @@ async function main() {
 
   startSleepScheduler();
   logger.info("Sleep/consolidation scheduler started");
+
+  // Fire-and-forget key health check on boot
+  void runStartupKeyCheck();
 
   app.listen(port, (err) => {
     if (err) {

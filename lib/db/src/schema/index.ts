@@ -5,3 +5,6 @@ export * from "./synapses";
 export * from "./insights";
 export * from "./modulators";
 export * from "./webhooks";
+export * from "./chatMessages";
+export * from "./jarvisMemory";
+export * from "./images";

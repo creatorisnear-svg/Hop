@@ -16,6 +16,10 @@ import SleepPage from "@/pages/sleep";
 import ModulatorsPage from "@/pages/modulators";
 import WebhooksPage from "@/pages/webhooks";
 import PluginsPage from "@/pages/plugins";
+import ImagesPage from "@/pages/images";
+import MemoryPage from "@/pages/memory";
+import KeysPage from "@/pages/keys";
+import { JarvisChat } from "@/components/jarvis-chat";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -39,6 +43,9 @@ function Router() {
       <Route path="/modulators" component={ModulatorsPage} />
       <Route path="/webhooks" component={WebhooksPage} />
       <Route path="/plugins" component={PluginsPage} />
+      <Route path="/images" component={ImagesPage} />
+      <Route path="/memory" component={MemoryPage} />
+      <Route path="/keys" component={KeysPage} />
       <Route component={NotFound} />
     </Switch>
   );
@@ -50,6 +57,7 @@ function App() {
       <TooltipProvider>
         <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
           <Router />
+          <JarvisChat />
         </WouterRouter>
         <Toaster theme="dark" />
       </TooltipProvider>
