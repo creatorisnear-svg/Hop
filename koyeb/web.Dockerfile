@@ -23,7 +23,8 @@ RUN mkdir /runtime-deps && cd /runtime-deps \
  && npm install --omit=dev --no-audit --no-fund \
       drizzle-kit@0.31.9 \
       drizzle-orm@0.45.2 \
-      pg@8.20.0
+      pg@8.20.0 \
+      @google/genai@1.50.1
 
 # ----- Slim runtime image -----
 FROM node:20-bookworm-slim AS runtime
