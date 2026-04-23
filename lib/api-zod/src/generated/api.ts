@@ -366,3 +366,60 @@ export const ListSynapsesResponseItem = zod.object({
   updatedAt: zod.coerce.date(),
 });
 export const ListSynapsesResponse = zod.array(ListSynapsesResponseItem);
+
+/**
+ * @summary List registered agent tools
+ */
+export const ListToolsResponseItem = zod.object({
+  name: zod.string(),
+  description: zod.string(),
+  paramsSchema: zod.record(zod.string(), zod.unknown()),
+});
+export const ListToolsResponse = zod.array(ListToolsResponseItem);
+
+/**
+ * @summary Run a tool by name with JSON params
+ */
+export const InvokeToolParams = zod.object({
+  name: zod.coerce.string(),
+});
+
+export const InvokeToolBody = zod.record(zod.string(), zod.unknown());
+
+export const InvokeToolResponse = zod.object({
+  ok: zod.boolean(),
+  durationMs: zod.number(),
+  result: zod.unknown().optional(),
+  error: zod.string().optional(),
+});
+
+/**
+ * @summary List insights consolidated during sleep
+ */
+export const ListInsightsResponseItem = zod.object({
+  id: zod.string(),
+  kind: zod.enum(["pattern", "lesson", "preference"]),
+  content: zod.string(),
+  sourceRunIds: zod.array(zod.string()),
+  createdAt: zod.coerce.date(),
+});
+export const ListInsightsResponse = zod.array(ListInsightsResponseItem);
+
+/**
+ * @summary Sleep scheduler status
+ */
+export const GetSleepStatusResponse = zod.object({
+  isSleeping: zod.boolean(),
+  lastRunAt: zod.coerce.date().nullish(),
+  lastSleepAt: zod.coerce.date().nullish(),
+  insightsLastCycle: zod.number(),
+});
+
+/**
+ * @summary Manually trigger a sleep/consolidation cycle
+ */
+export const RunSleepResponse = zod.object({
+  insightsCreated: zod.number(),
+  consideredRuns: zod.number(),
+  skippedReason: zod.string().optional(),
+});

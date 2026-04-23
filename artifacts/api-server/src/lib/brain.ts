@@ -6,6 +6,8 @@ import { brainBus } from "./eventBus";
 import { logger } from "./logger";
 import { jarvisPlan, jarvisSynthesize, type JarvisPlan, type RegionKey } from "./jarvis";
 import { planningHint, reinforcePath } from "./synapses";
+import { invokeTool } from "./tools";
+import { noteRunActivity } from "./sleep";
 
 const cancelled = new Set<string>();
 
@@ -119,6 +121,7 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
   };
 
   try {
+    noteRunActivity();
     await setRunStatus(runId, { status: "running" });
     const regions = await loadRegions();
 
@@ -146,6 +149,31 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
     for (const step of cappedSteps) {
       checkCancel();
       stepIndex += 1;
+
+      // ----- Tool step: skip the LLM, run a registered tool -----
+      if (step.tool) {
+        const t0 = Date.now();
+        const result = await invokeTool(step.tool, step.params ?? {});
+        const summary =
+          `[tool: ${step.tool}] ${result.ok ? "OK" : "ERROR"}\n` +
+          (result.ok
+            ? "```json\n" + JSON.stringify(result.result, null, 2).slice(0, 2400) + "\n```"
+            : `Error: ${result.error}`);
+        await recordMessage(
+          runId,
+          step.region,
+          "tool",
+          stepIndex,
+          summary,
+          Date.now() - t0,
+        );
+        synthInputs.push({ region: step.region, instruction: step.instruction, output: summary });
+        priorContext +=
+          (priorContext ? "\n\n" : "") + `[${step.region}/${step.tool}] ${summary.slice(0, 1200)}`;
+        await db.update(runsTable).set({ iterations: stepIndex }).where(eq(runsTable.id, runId));
+        continue;
+      }
+
       const region = regions[step.region];
       if (!region) {
         const msg = `[Jarvis] Region ${step.region} not found in DB — skipping.`;

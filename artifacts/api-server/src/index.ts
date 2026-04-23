@@ -2,6 +2,8 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { ensureRegionsSeeded } from "./lib/brain";
 import { REGION_DEFAULTS } from "./lib/regionDefaults";
+import { registerBuiltinTools } from "./lib/tools/builtins";
+import { startSleepScheduler } from "./lib/sleep";
 
 const rawPort = process.env["PORT"];
 
@@ -24,6 +26,12 @@ async function main() {
   } catch (err) {
     logger.error({ err }, "Failed to seed regions");
   }
+
+  registerBuiltinTools();
+  logger.info("Built-in agent tools registered");
+
+  startSleepScheduler();
+  logger.info("Sleep/consolidation scheduler started");
 
   app.listen(port, (err) => {
     if (err) {

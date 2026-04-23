@@ -71,10 +71,19 @@ export async function topPairs(n = 5, minTotal = 2): Promise<SynapseRow[]> {
 /** A short human-readable hint Jarvis can include in his planning prompt. */
 export async function planningHint(): Promise<string> {
   const top = await topPairs(5, 2);
-  if (top.length === 0) return "";
-  const lines = top.map(
-    (s) =>
-      `- ${s.fromRegion} → ${s.toRegion} (strength ${(s.strength * 100).toFixed(0)}%, fired ${s.totalCount}x)`,
-  );
-  return `Proven region pathways from past runs (prefer these when relevant):\n${lines.join("\n")}`;
+  const { recentInsightLines } = await import("./sleep");
+  const insightLines = await recentInsightLines(3);
+
+  const sections: string[] = [];
+  if (top.length > 0) {
+    const lines = top.map(
+      (s) =>
+        `- ${s.fromRegion} → ${s.toRegion} (strength ${(s.strength * 100).toFixed(0)}%, fired ${s.totalCount}x)`,
+    );
+    sections.push(`Proven region pathways from past runs (prefer these when relevant):\n${lines.join("\n")}`);
+  }
+  if (insightLines.length > 0) {
+    sections.push(`Insights consolidated during sleep:\n${insightLines.join("\n")}`);
+  }
+  return sections.join("\n\n");
 }

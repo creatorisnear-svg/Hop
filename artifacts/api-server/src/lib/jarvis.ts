@@ -1,5 +1,6 @@
 import { ai } from "@workspace/integrations-gemini-ai";
 import { logger } from "./logger";
+import { listTools } from "./tools";
 
 const MODEL = "gemini-2.5-flash";
 
@@ -17,6 +18,8 @@ export type RegionKey = (typeof REGION_KEYS)[number];
 export interface JarvisStep {
   region: RegionKey;
   instruction: string;
+  tool?: string;
+  params?: Record<string, unknown>;
 }
 
 export interface JarvisPlan {
@@ -24,7 +27,15 @@ export interface JarvisPlan {
   steps: JarvisStep[];
 }
 
-const PLAN_SYSTEM = `You are Jarvis, the central conductor of a six-region neuromorphic brain.
+function buildPlanSystem(): string {
+  const tools = listTools();
+  const toolsBlock = tools.length
+    ? `\n\nAvailable agent tools (any step may set "tool" + "params" instead of calling a region's LLM — the region field is the owner that records the result):\n${tools
+        .map((t) => `- ${t.name}: ${t.description}`)
+        .join("\n")}\n\nFor a tool step, format: { "region": "hippocampus", "instruction": "why we're calling this tool", "tool": "search_memory", "params": { ... } }`
+    : "";
+
+  return `You are Jarvis, the central conductor of a six-region neuromorphic brain.
 
 Your six worker regions:
 - sensory_cortex: extracts the key signals from the prompt (perception)
@@ -34,7 +45,7 @@ Your six worker regions:
 - cerebellum: critiques the draft and decides if it is good enough (critic)
 - motor_cortex: polishes the final wording (output)
 
-Given a user goal, decide the best ordered sequence of region calls. You may use the same region multiple times if useful (e.g. prefrontal twice for refinement). Each step must include a custom instruction telling that region exactly what to focus on for THIS goal. 4 to 8 steps is typical.
+Given a user goal, decide the best ordered sequence of region calls. You may use the same region multiple times if useful (e.g. prefrontal twice for refinement). Each step must include a custom instruction telling that region exactly what to focus on for THIS goal. 4 to 8 steps is typical.${toolsBlock}
 
 Reply ONLY with JSON of the shape:
 {
@@ -44,6 +55,7 @@ Reply ONLY with JSON of the shape:
     ...
   ]
 }`;
+}
 
 const SYNTH_SYSTEM = `You are Jarvis, the central conductor of a six-region neuromorphic brain.
 
@@ -83,6 +95,8 @@ function isValidPlan(value: unknown): value is JarvisPlan {
     if (typeof step.region !== "string") return false;
     if (!REGION_KEYS.includes(step.region as RegionKey)) return false;
     if (typeof step.instruction !== "string" || step.instruction.length === 0) return false;
+    if (step.tool !== undefined && typeof step.tool !== "string") return false;
+    if (step.params !== undefined && (typeof step.params !== "object" || step.params === null)) return false;
   }
   return true;
 }
@@ -98,7 +112,7 @@ export async function jarvisPlan(goal: string, hint?: string): Promise<JarvisPla
         { role: "user", parts: [{ text: userText }] },
       ],
       config: {
-        systemInstruction: PLAN_SYSTEM,
+        systemInstruction: buildPlanSystem(),
         responseMimeType: "application/json",
         maxOutputTokens: 8192,
         temperature: 0.4,

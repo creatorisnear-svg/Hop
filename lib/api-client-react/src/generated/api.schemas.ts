@@ -138,6 +138,52 @@ export interface Synapse {
   updatedAt: string;
 }
 
+export type ToolParamsSchema = { [key: string]: unknown };
+
+export interface Tool {
+  name: string;
+  description: string;
+  paramsSchema: ToolParamsSchema;
+}
+
+export interface ToolResult {
+  ok: boolean;
+  durationMs: number;
+  result?: unknown;
+  error?: string;
+}
+
+export type InsightKind = (typeof InsightKind)[keyof typeof InsightKind];
+
+export const InsightKind = {
+  pattern: "pattern",
+  lesson: "lesson",
+  preference: "preference",
+} as const;
+
+export interface Insight {
+  id: string;
+  kind: InsightKind;
+  content: string;
+  sourceRunIds: string[];
+  createdAt: string;
+}
+
+export interface SleepStatus {
+  isSleeping: boolean;
+  lastRunAt?: string | null;
+  lastSleepAt?: string | null;
+  insightsLastCycle: number;
+}
+
+export interface SleepCycleResult {
+  insightsCreated: number;
+  consideredRuns: number;
+  skippedReason?: string;
+}
+
 export type ListRunsParams = {
   limit?: number;
 };
+
+export type InvokeToolBody = { [key: string]: unknown };

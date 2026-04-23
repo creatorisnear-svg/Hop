@@ -227,6 +227,93 @@ paths:
                 items:
                   $ref: "#/components/schemas/Synapse"
 
+  /tools:
+    get:
+      operationId: listTools
+      tags: [tools]
+      summary: List registered agent tools
+      responses:
+        "200":
+          description: Tool list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Tool"
+
+  /tools/{name}/invoke:
+    post:
+      operationId: invokeTool
+      tags: [tools]
+      summary: Run a tool by name with JSON params
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Tool result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ToolResult"
+        "400":
+          description: Tool error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ToolResult"
+
+  /insights:
+    get:
+      operationId: listInsights
+      tags: [sleep]
+      summary: List insights consolidated during sleep
+      responses:
+        "200":
+          description: Insight list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Insight"
+
+  /sleep/status:
+    get:
+      operationId: getSleepStatus
+      tags: [sleep]
+      summary: Sleep scheduler status
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SleepStatus"
+
+  /sleep/run:
+    post:
+      operationId: runSleep
+      tags: [sleep]
+      summary: Manually trigger a sleep/consolidation cycle
+      responses:
+        "200":
+          description: Cycle result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SleepCycleResult"
+
 components:
   schemas:
     HealthStatus:
@@ -433,3 +520,73 @@ components:
         updatedAt:
           type: string
           format: date-time
+
+    Tool:
+      type: object
+      required: [name, description, paramsSchema]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        paramsSchema:
+          type: object
+          additionalProperties: true
+
+    ToolResult:
+      type: object
+      required: [ok, durationMs]
+      properties:
+        ok:
+          type: boolean
+        durationMs:
+          type: number
+        result: {}
+        error:
+          type: string
+
+    Insight:
+      type: object
+      required: [id, kind, content, sourceRunIds, createdAt]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [pattern, lesson, preference]
+        content:
+          type: string
+        sourceRunIds:
+          type: array
+          items: { type: string }
+        createdAt:
+          type: string
+          format: date-time
+
+    SleepStatus:
+      type: object
+      required: [isSleeping, insightsLastCycle]
+      properties:
+        isSleeping:
+          type: boolean
+        lastRunAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastSleepAt:
+          type: string
+          format: date-time
+          nullable: true
+        insightsLastCycle:
+          type: integer
+
+    SleepCycleResult:
+      type: object
+      required: [insightsCreated, consideredRuns]
+      properties:
+        insightsCreated:
+          type: integer
+        consideredRuns:
+          type: integer
+        skippedReason:
+          type: string

@@ -20,6 +20,8 @@ import type {
   CreateRunInput,
   DashboardInsights,
   HealthStatus,
+  Insight,
+  InvokeToolBody,
   ListRunsParams,
   PingResult,
   Region,
@@ -27,7 +29,11 @@ import type {
   RegionKey,
   RunDetail,
   RunSummary,
+  SleepCycleResult,
+  SleepStatus,
   Synapse,
+  Tool,
+  ToolResult,
   UpdateRegionInput,
 } from "./api.schemas";
 
@@ -1092,3 +1098,386 @@ export function useListSynapses<
 
   return { ...query, queryKey: queryOptions.queryKey };
 }
+
+/**
+ * @summary List registered agent tools
+ */
+export const getListToolsUrl = () => {
+  return `/api/tools`;
+};
+
+export const listTools = async (options?: RequestInit): Promise<Tool[]> => {
+  return customFetch<Tool[]>(getListToolsUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getListToolsQueryKey = () => {
+  return [`/api/tools`] as const;
+};
+
+export const getListToolsQueryOptions = <
+  TData = Awaited<ReturnType<typeof listTools>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<Awaited<ReturnType<typeof listTools>>, TError, TData>;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getListToolsQueryKey();
+
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof listTools>>> = ({
+    signal,
+  }) => listTools({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof listTools>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type ListToolsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof listTools>>
+>;
+export type ListToolsQueryError = ErrorType<unknown>;
+
+/**
+ * @summary List registered agent tools
+ */
+
+export function useListTools<
+  TData = Awaited<ReturnType<typeof listTools>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<Awaited<ReturnType<typeof listTools>>, TError, TData>;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getListToolsQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Run a tool by name with JSON params
+ */
+export const getInvokeToolUrl = (name: string) => {
+  return `/api/tools/${name}/invoke`;
+};
+
+export const invokeTool = async (
+  name: string,
+  invokeToolBody?: InvokeToolBody,
+  options?: RequestInit,
+): Promise<ToolResult> => {
+  return customFetch<ToolResult>(getInvokeToolUrl(name), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(invokeToolBody),
+  });
+};
+
+export const getInvokeToolMutationOptions = <
+  TError = ErrorType<ToolResult>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof invokeTool>>,
+    TError,
+    { name: string; data: BodyType<InvokeToolBody> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof invokeTool>>,
+  TError,
+  { name: string; data: BodyType<InvokeToolBody> },
+  TContext
+> => {
+  const mutationKey = ["invokeTool"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof invokeTool>>,
+    { name: string; data: BodyType<InvokeToolBody> }
+  > = (props) => {
+    const { name, data } = props ?? {};
+
+    return invokeTool(name, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type InvokeToolMutationResult = NonNullable<
+  Awaited<ReturnType<typeof invokeTool>>
+>;
+export type InvokeToolMutationBody = BodyType<InvokeToolBody>;
+export type InvokeToolMutationError = ErrorType<ToolResult>;
+
+/**
+ * @summary Run a tool by name with JSON params
+ */
+export const useInvokeTool = <
+  TError = ErrorType<ToolResult>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof invokeTool>>,
+    TError,
+    { name: string; data: BodyType<InvokeToolBody> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof invokeTool>>,
+  TError,
+  { name: string; data: BodyType<InvokeToolBody> },
+  TContext
+> => {
+  return useMutation(getInvokeToolMutationOptions(options));
+};
+
+/**
+ * @summary List insights consolidated during sleep
+ */
+export const getListInsightsUrl = () => {
+  return `/api/insights`;
+};
+
+export const listInsights = async (
+  options?: RequestInit,
+): Promise<Insight[]> => {
+  return customFetch<Insight[]>(getListInsightsUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getListInsightsQueryKey = () => {
+  return [`/api/insights`] as const;
+};
+
+export const getListInsightsQueryOptions = <
+  TData = Awaited<ReturnType<typeof listInsights>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof listInsights>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getListInsightsQueryKey();
+
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof listInsights>>> = ({
+    signal,
+  }) => listInsights({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof listInsights>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type ListInsightsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof listInsights>>
+>;
+export type ListInsightsQueryError = ErrorType<unknown>;
+
+/**
+ * @summary List insights consolidated during sleep
+ */
+
+export function useListInsights<
+  TData = Awaited<ReturnType<typeof listInsights>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof listInsights>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getListInsightsQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Sleep scheduler status
+ */
+export const getGetSleepStatusUrl = () => {
+  return `/api/sleep/status`;
+};
+
+export const getSleepStatus = async (
+  options?: RequestInit,
+): Promise<SleepStatus> => {
+  return customFetch<SleepStatus>(getGetSleepStatusUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetSleepStatusQueryKey = () => {
+  return [`/api/sleep/status`] as const;
+};
+
+export const getGetSleepStatusQueryOptions = <
+  TData = Awaited<ReturnType<typeof getSleepStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getSleepStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetSleepStatusQueryKey();
+
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof getSleepStatus>>> = ({
+    signal,
+  }) => getSleepStatus({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getSleepStatus>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetSleepStatusQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getSleepStatus>>
+>;
+export type GetSleepStatusQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Sleep scheduler status
+ */
+
+export function useGetSleepStatus<
+  TData = Awaited<ReturnType<typeof getSleepStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getSleepStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetSleepStatusQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Manually trigger a sleep/consolidation cycle
+ */
+export const getRunSleepUrl = () => {
+  return `/api/sleep/run`;
+};
+
+export const runSleep = async (
+  options?: RequestInit,
+): Promise<SleepCycleResult> => {
+  return customFetch<SleepCycleResult>(getRunSleepUrl(), {
+    ...options,
+    method: "POST",
+  });
+};
+
+export const getRunSleepMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof runSleep>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof runSleep>>,
+  TError,
+  void,
+  TContext
+> => {
+  const mutationKey = ["runSleep"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof runSleep>>,
+    void
+  > = () => {
+    return runSleep(requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type RunSleepMutationResult = NonNullable<
+  Awaited<ReturnType<typeof runSleep>>
+>;
+
+export type RunSleepMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Manually trigger a sleep/consolidation cycle
+ */
+export const useRunSleep = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof runSleep>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof runSleep>>,
+  TError,
+  void,
+  TContext
+> => {
+  return useMutation(getRunSleepMutationOptions(options));
+};
