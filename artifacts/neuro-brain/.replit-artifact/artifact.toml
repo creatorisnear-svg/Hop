@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "NeuroLinked Brain"
+version = "1.0.0"
+id = "artifacts/neuro-brain"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21092
+
+[services.development]
+run = "pnpm --filter @workspace/neuro-brain run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/neuro-brain", "run", "build" ]
+publicDir = "artifacts/neuro-brain/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21092"
+BASE_PATH = "/"

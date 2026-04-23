@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "l4mt3NkkeVYLCMN6VR_5J"
+uri = "file://koyeb/DEPLOY.md"
+type = "text"
+title = "Koyeb Deploy Guide — 6 Brain Regions"

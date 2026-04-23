@@ -1,22 +1,22 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: NeuroLinked Brain — multi-agent Ollama orchestration API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
-    description: Health operations
+  - name: regions
+  - name: runs
+  - name: insights
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,6 +24,194 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /regions:
+    get:
+      operationId: listRegions
+      tags: [regions]
+      summary: List all 6 brain regions and their Ollama config
+      responses:
+        "200":
+          description: Regions list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Region"
+  /regions/{regionKey}:
+    parameters:
+      - in: path
+        name: regionKey
+        required: true
+        schema:
+          $ref: "#/components/schemas/RegionKey"
+    get:
+      operationId: getRegion
+      tags: [regions]
+      summary: Get a single region
+      responses:
+        "200":
+          description: Region
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Region"
+    patch:
+      operationId: updateRegion
+      tags: [regions]
+      summary: Update a region's Ollama endpoint, model, or system prompt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateRegionInput"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Region"
+  /regions/{regionKey}/ping:
+    parameters:
+      - in: path
+        name: regionKey
+        required: true
+        schema:
+          $ref: "#/components/schemas/RegionKey"
+    post:
+      operationId: pingRegion
+      tags: [regions]
+      summary: Test the Ollama endpoint for a region
+      responses:
+        "200":
+          description: Ping result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PingResult"
+
+  /runs:
+    get:
+      operationId: listRuns
+      tags: [runs]
+      summary: List recent autonomous runs
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+      responses:
+        "200":
+          description: Runs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RunSummary"
+    post:
+      operationId: createRun
+      tags: [runs]
+      summary: Start a new autonomous brain run
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRunInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunSummary"
+  /runs/{runId}:
+    parameters:
+      - in: path
+        name: runId
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getRun
+      tags: [runs]
+      summary: Get a run with all messages
+      responses:
+        "200":
+          description: Run detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunDetail"
+  /runs/{runId}/cancel:
+    parameters:
+      - in: path
+        name: runId
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: cancelRun
+      tags: [runs]
+      summary: Cancel an in-progress run
+      responses:
+        "200":
+          description: Cancelled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunSummary"
+  /runs/{runId}/stream:
+    parameters:
+      - in: path
+        name: runId
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: streamRun
+      tags: [runs]
+      summary: Server-Sent Events stream of run activity
+      responses:
+        "200":
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  /insights/dashboard:
+    get:
+      operationId: getDashboardInsights
+      tags: [insights]
+      summary: Brain-wide stats — totals, region usage, recent activity
+      responses:
+        "200":
+          description: Dashboard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardInsights"
+  /insights/region-activity:
+    get:
+      operationId: getRegionActivity
+      tags: [insights]
+      summary: Per-region message counts and avg latency over recent runs
+      responses:
+        "200":
+          description: Region activity
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RegionActivity"
+
 components:
   schemas:
     HealthStatus:
@@ -31,6 +219,180 @@ components:
       properties:
         status:
           type: string
-      required:
-        - status
+      required: [status]
 
+    RegionKey:
+      type: string
+      enum:
+        - sensory_cortex
+        - association_cortex
+        - prefrontal_cortex
+        - hippocampus
+        - cerebellum
+        - motor_cortex
+
+    AgentRole:
+      type: string
+      enum: [researcher, planner, executor, memory, critic, summarizer]
+
+    Region:
+      type: object
+      required: [key, role, name, description, ollamaUrl, model, systemPrompt, temperature, enabled]
+      properties:
+        key:
+          $ref: "#/components/schemas/RegionKey"
+        role:
+          $ref: "#/components/schemas/AgentRole"
+        name:
+          type: string
+        description:
+          type: string
+        ollamaUrl:
+          type: string
+          description: Base URL of an Ollama server (e.g. https://my-ollama.koyeb.app)
+        model:
+          type: string
+          description: Ollama model tag, e.g. qwen2.5:1.5b-instruct
+        systemPrompt:
+          type: string
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+        enabled:
+          type: boolean
+
+    UpdateRegionInput:
+      type: object
+      properties:
+        ollamaUrl:
+          type: string
+        model:
+          type: string
+        systemPrompt:
+          type: string
+        temperature:
+          type: number
+        enabled:
+          type: boolean
+
+    PingResult:
+      type: object
+      required: [ok, latencyMs]
+      properties:
+        ok:
+          type: boolean
+        latencyMs:
+          type: number
+        modelsAvailable:
+          type: array
+          items:
+            type: string
+        error:
+          type: string
+
+    CreateRunInput:
+      type: object
+      required: [goal]
+      properties:
+        goal:
+          type: string
+        maxIterations:
+          type: integer
+          default: 6
+          minimum: 1
+          maximum: 20
+
+    RunStatus:
+      type: string
+      enum: [pending, running, succeeded, failed, cancelled]
+
+    RunSummary:
+      type: object
+      required: [id, goal, status, createdAt, iterations]
+      properties:
+        id:
+          type: string
+        goal:
+          type: string
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        createdAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        iterations:
+          type: integer
+        finalAnswer:
+          type: string
+        error:
+          type: string
+
+    BrainMessage:
+      type: object
+      required: [id, runId, region, role, content, iteration, createdAt]
+      properties:
+        id:
+          type: string
+        runId:
+          type: string
+        region:
+          $ref: "#/components/schemas/RegionKey"
+        role:
+          $ref: "#/components/schemas/AgentRole"
+        content:
+          type: string
+        iteration:
+          type: integer
+        latencyMs:
+          type: number
+        createdAt:
+          type: string
+          format: date-time
+
+    RunDetail:
+      type: object
+      required: [run, messages]
+      properties:
+        run:
+          $ref: "#/components/schemas/RunSummary"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/BrainMessage"
+
+    DashboardInsights:
+      type: object
+      required: [totalRuns, succeededRuns, failedRuns, runningRuns, totalMessages, avgIterations, recentRuns]
+      properties:
+        totalRuns:
+          type: integer
+        succeededRuns:
+          type: integer
+        failedRuns:
+          type: integer
+        runningRuns:
+          type: integer
+        totalMessages:
+          type: integer
+        avgIterations:
+          type: number
+        recentRuns:
+          type: array
+          items:
+            $ref: "#/components/schemas/RunSummary"
+
+    RegionActivity:
+      type: object
+      required: [region, role, messageCount, avgLatencyMs]
+      properties:
+        region:
+          $ref: "#/components/schemas/RegionKey"
+        role:
+          $ref: "#/components/schemas/AgentRole"
+        messageCount:
+          type: integer
+        avgLatencyMs:
+          type: number

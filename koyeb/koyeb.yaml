@@ -1,0 +1,37 @@
+# Example Koyeb service definition for one Ollama-Qwen brain region.
+# Deploy 6 separate services (one per region) for full parallelism,
+# or 1 service shared across all 6 regions to stay free.
+#
+# Use the Koyeb CLI:   koyeb service create --file koyeb.yaml
+# Or paste the equivalent fields into the Koyeb web UI.
+#
+# Tip: name each service after its region — neuro-sensory-cortex,
+# neuro-association-cortex, neuro-prefrontal-cortex, neuro-hippocampus,
+# neuro-cerebellum, neuro-motor-cortex.
+
+name: neuro-sensory-cortex
+type: web
+instance_type: free            # Or "eco-small" for $5/mo. Free = 512MB / sleeps when idle.
+regions:
+  - was                        # Washington. Pick the region closest to this app.
+ports:
+  - port: 8080
+    protocol: http
+routes:
+  - path: /
+    port: 8080
+health_checks:
+  - path: /
+    port: 8080
+    interval: 30
+    grace_period: 120
+docker:
+  dockerfile: koyeb/Dockerfile
+  build_args:
+    - MODEL=qwen2.5:1.5b-instruct   # change per service if you want different models per region
+env:
+  - OLLAMA_HOST=0.0.0.0:8080
+  - OLLAMA_KEEP_ALIVE=24h
+scaling:
+  min: 1
+  max: 1

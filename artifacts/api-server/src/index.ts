@@ -1,5 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
+import { ensureRegionsSeeded } from "./lib/brain";
+import { REGION_DEFAULTS } from "./lib/regionDefaults";
 
 const rawPort = process.env["PORT"];
 
@@ -15,11 +17,21 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-app.listen(port, (err) => {
-  if (err) {
-    logger.error({ err }, "Error listening on port");
-    process.exit(1);
+async function main() {
+  try {
+    await ensureRegionsSeeded(REGION_DEFAULTS);
+    logger.info("Brain regions seeded");
+  } catch (err) {
+    logger.error({ err }, "Failed to seed regions");
   }
 
-  logger.info({ port }, "Server listening");
-});
+  app.listen(port, (err) => {
+    if (err) {
+      logger.error({ err }, "Error listening on port");
+      process.exit(1);
+    }
+    logger.info({ port }, "Server listening");
+  });
+}
+
+void main();
