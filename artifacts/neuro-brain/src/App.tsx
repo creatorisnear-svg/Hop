@@ -13,6 +13,7 @@ import Runs from "@/pages/runs";
 import SynapsesPage from "@/pages/synapses";
 import ToolsPage from "@/pages/tools";
 import SleepPage from "@/pages/sleep";
+import ModulatorsPage from "@/pages/modulators";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -33,6 +34,7 @@ function Router() {
       <Route path="/synapses" component={SynapsesPage} />
       <Route path="/tools" component={ToolsPage} />
       <Route path="/sleep" component={SleepPage} />
+      <Route path="/modulators" component={ModulatorsPage} />
       <Route component={NotFound} />
     </Switch>
   );

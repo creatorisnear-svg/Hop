@@ -182,6 +182,52 @@ export interface SleepCycleResult {
   skippedReason?: string;
 }
 
+export interface Modulators {
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  focus: number;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  energy: number;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  calm: number;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  curiosity: number;
+}
+
+export interface ModulatorsPatch {
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  focus?: number;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  energy?: number;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  calm?: number;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  curiosity?: number;
+}
+
 export type ListRunsParams = {
   limit?: number;
 };

@@ -73,8 +73,10 @@ export async function planningHint(): Promise<string> {
   const top = await topPairs(5, 2);
   const { recentInsightLines } = await import("./sleep");
   const insightLines = await recentInsightLines(3);
+  const { getModulators, modulatorHintLine } = await import("./modulators");
+  const mods = await getModulators();
 
-  const sections: string[] = [];
+  const sections: string[] = [modulatorHintLine(mods)];
   if (top.length > 0) {
     const lines = top.map(
       (s) =>

@@ -15,6 +15,8 @@ export * from "./insight";
 export * from "./insightKind";
 export * from "./invokeToolBody";
 export * from "./listRunsParams";
+export * from "./modulators";
+export * from "./modulatorsPatch";
 export * from "./pingResult";
 export * from "./region";
 export * from "./regionActivity";

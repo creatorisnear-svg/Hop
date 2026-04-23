@@ -423,3 +423,106 @@ export const RunSleepResponse = zod.object({
   consideredRuns: zod.number(),
   skippedReason: zod.string().optional(),
 });
+
+/**
+ * @summary Read current global neuromodulator state
+ */
+export const getModulatorsResponseFocusMin = 0;
+export const getModulatorsResponseFocusMax = 1;
+
+export const getModulatorsResponseEnergyMin = 0;
+export const getModulatorsResponseEnergyMax = 1;
+
+export const getModulatorsResponseCalmMin = 0;
+export const getModulatorsResponseCalmMax = 1;
+
+export const getModulatorsResponseCuriosityMin = 0;
+export const getModulatorsResponseCuriosityMax = 1;
+
+export const GetModulatorsResponse = zod.object({
+  focus: zod
+    .number()
+    .min(getModulatorsResponseFocusMin)
+    .max(getModulatorsResponseFocusMax),
+  energy: zod
+    .number()
+    .min(getModulatorsResponseEnergyMin)
+    .max(getModulatorsResponseEnergyMax),
+  calm: zod
+    .number()
+    .min(getModulatorsResponseCalmMin)
+    .max(getModulatorsResponseCalmMax),
+  curiosity: zod
+    .number()
+    .min(getModulatorsResponseCuriosityMin)
+    .max(getModulatorsResponseCuriosityMax),
+});
+
+/**
+ * @summary Update one or more modulator values
+ */
+export const updateModulatorsBodyFocusMin = 0;
+export const updateModulatorsBodyFocusMax = 1;
+
+export const updateModulatorsBodyEnergyMin = 0;
+export const updateModulatorsBodyEnergyMax = 1;
+
+export const updateModulatorsBodyCalmMin = 0;
+export const updateModulatorsBodyCalmMax = 1;
+
+export const updateModulatorsBodyCuriosityMin = 0;
+export const updateModulatorsBodyCuriosityMax = 1;
+
+export const UpdateModulatorsBody = zod.object({
+  focus: zod
+    .number()
+    .min(updateModulatorsBodyFocusMin)
+    .max(updateModulatorsBodyFocusMax)
+    .optional(),
+  energy: zod
+    .number()
+    .min(updateModulatorsBodyEnergyMin)
+    .max(updateModulatorsBodyEnergyMax)
+    .optional(),
+  calm: zod
+    .number()
+    .min(updateModulatorsBodyCalmMin)
+    .max(updateModulatorsBodyCalmMax)
+    .optional(),
+  curiosity: zod
+    .number()
+    .min(updateModulatorsBodyCuriosityMin)
+    .max(updateModulatorsBodyCuriosityMax)
+    .optional(),
+});
+
+export const updateModulatorsResponseFocusMin = 0;
+export const updateModulatorsResponseFocusMax = 1;
+
+export const updateModulatorsResponseEnergyMin = 0;
+export const updateModulatorsResponseEnergyMax = 1;
+
+export const updateModulatorsResponseCalmMin = 0;
+export const updateModulatorsResponseCalmMax = 1;
+
+export const updateModulatorsResponseCuriosityMin = 0;
+export const updateModulatorsResponseCuriosityMax = 1;
+
+export const UpdateModulatorsResponse = zod.object({
+  focus: zod
+    .number()
+    .min(updateModulatorsResponseFocusMin)
+    .max(updateModulatorsResponseFocusMax),
+  energy: zod
+    .number()
+    .min(updateModulatorsResponseEnergyMin)
+    .max(updateModulatorsResponseEnergyMax),
+  calm: zod
+    .number()
+    .min(updateModulatorsResponseCalmMin)
+    .max(updateModulatorsResponseCalmMax),
+  curiosity: zod
+    .number()
+    .min(updateModulatorsResponseCuriosityMin)
+    .max(updateModulatorsResponseCuriosityMax),
+});

@@ -6,6 +6,7 @@ import insightsRouter from "./insights";
 import synapsesRouter from "./synapses";
 import toolsRouter from "./tools";
 import sleepRouter from "./sleep";
+import modulatorsRouter from "./modulators";
 
 const router: IRouter = Router();
 
@@ -16,5 +17,6 @@ router.use(insightsRouter);
 router.use(synapsesRouter);
 router.use(toolsRouter);
 router.use(sleepRouter);
+router.use(modulatorsRouter);
 
 export default router;

@@ -23,6 +23,8 @@ import type {
   Insight,
   InvokeToolBody,
   ListRunsParams,
+  Modulators,
+  ModulatorsPatch,
   PingResult,
   Region,
   RegionActivity,
@@ -1480,4 +1482,165 @@ export const useRunSleep = <
   TContext
 > => {
   return useMutation(getRunSleepMutationOptions(options));
+};
+
+/**
+ * @summary Read current global neuromodulator state
+ */
+export const getGetModulatorsUrl = () => {
+  return `/api/modulators`;
+};
+
+export const getModulators = async (
+  options?: RequestInit,
+): Promise<Modulators> => {
+  return customFetch<Modulators>(getGetModulatorsUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetModulatorsQueryKey = () => {
+  return [`/api/modulators`] as const;
+};
+
+export const getGetModulatorsQueryOptions = <
+  TData = Awaited<ReturnType<typeof getModulators>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getModulators>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetModulatorsQueryKey();
+
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof getModulators>>> = ({
+    signal,
+  }) => getModulators({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getModulators>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetModulatorsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getModulators>>
+>;
+export type GetModulatorsQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Read current global neuromodulator state
+ */
+
+export function useGetModulators<
+  TData = Awaited<ReturnType<typeof getModulators>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getModulators>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetModulatorsQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Update one or more modulator values
+ */
+export const getUpdateModulatorsUrl = () => {
+  return `/api/modulators`;
+};
+
+export const updateModulators = async (
+  modulatorsPatch: ModulatorsPatch,
+  options?: RequestInit,
+): Promise<Modulators> => {
+  return customFetch<Modulators>(getUpdateModulatorsUrl(), {
+    ...options,
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(modulatorsPatch),
+  });
+};
+
+export const getUpdateModulatorsMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof updateModulators>>,
+    TError,
+    { data: BodyType<ModulatorsPatch> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof updateModulators>>,
+  TError,
+  { data: BodyType<ModulatorsPatch> },
+  TContext
+> => {
+  const mutationKey = ["updateModulators"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof updateModulators>>,
+    { data: BodyType<ModulatorsPatch> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return updateModulators(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type UpdateModulatorsMutationResult = NonNullable<
+  Awaited<ReturnType<typeof updateModulators>>
+>;
+export type UpdateModulatorsMutationBody = BodyType<ModulatorsPatch>;
+export type UpdateModulatorsMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Update one or more modulator values
+ */
+export const useUpdateModulators = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof updateModulators>>,
+    TError,
+    { data: BodyType<ModulatorsPatch> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof updateModulators>>,
+  TError,
+  { data: BodyType<ModulatorsPatch> },
+  TContext
+> => {
+  return useMutation(getUpdateModulatorsMutationOptions(options));
 };

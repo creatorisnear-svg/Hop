@@ -7,9 +7,10 @@ import { Button } from "@/components/ui/button";
 import { useGetRun, getGetRunQueryKey, useCancelRun } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { BrainMessage, RunStatus } from "@workspace/api-client-react/src/generated/api.schemas";
-import { BrainCircuit, Clock, XCircle, Terminal, Layers } from "lucide-react";
+import { BrainCircuit, Clock, XCircle, Terminal, Layers, Volume2, VolumeX } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
+import { speak, stopSpeaking, useAutoSpeak } from "@/lib/useVoice";
 
 export default function LiveRun() {
   const [, params] = useRoute("/run/:id");
@@ -19,6 +20,8 @@ export default function LiveRun() {
 
   const [streamMessages, setStreamMessages] = useState<BrainMessage[]>([]);
   const [activeRegion, setActiveRegion] = useState<string | undefined>();
+  const [autoSpeak, setAutoSpeakState] = useAutoSpeak();
+  const spokenForRunRef = React.useRef<string | null>(null);
 
   const { data, isLoading, isError } = useGetRun(runId, {
     query: {
@@ -77,6 +80,18 @@ export default function LiveRun() {
       eventSource.close();
     };
   }, [runId, run?.status, queryClient]);
+
+  // Auto-speak the final answer once per run when it arrives.
+  useEffect(() => {
+    if (!autoSpeak) return;
+    if (!run?.finalAnswer) return;
+    if (run.status !== "succeeded") return;
+    if (spokenForRunRef.current === run.id) return;
+    spokenForRunRef.current = run.id;
+    speak(run.finalAnswer);
+  }, [autoSpeak, run?.id, run?.finalAnswer, run?.status]);
+
+  useEffect(() => () => stopSpeaking(), []);
 
   const handleCancel = () => {
     cancelRun.mutate({ runId }, {
@@ -138,10 +153,35 @@ export default function LiveRun() {
           {run.finalAnswer && (
             <Card className="bg-primary/5 border-primary/30 shadow-[0_0_15px_hsl(var(--primary)/0.1)]">
               <CardHeader>
-                <CardTitle className="text-primary flex items-center gap-2">
-                  <Terminal className="w-5 h-5" />
-                  Final Synthesis
-                </CardTitle>
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-primary flex items-center gap-2">
+                    <Terminal className="w-5 h-5" />
+                    Final Synthesis
+                  </CardTitle>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => speak(run.finalAnswer ?? "")}
+                    >
+                      <Volume2 className="w-3.5 h-3.5 mr-1.5" />
+                      Speak
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={autoSpeak ? "default" : "outline"}
+                      onClick={() => {
+                        setAutoSpeakState(!autoSpeak);
+                        if (autoSpeak) stopSpeaking();
+                      }}
+                      title="Auto-speak future answers"
+                    >
+                      {autoSpeak ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+                    </Button>
+                  </div>
+                </div>
               </CardHeader>
               <CardContent>
                 <div className="prose prose-invert max-w-none text-foreground">

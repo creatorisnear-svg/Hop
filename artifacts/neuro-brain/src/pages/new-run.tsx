@@ -8,8 +8,9 @@ import { Label } from "@/components/ui/label";
 import { useCreateRun } from "@workspace/api-client-react";
 import { useLocation } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
-import { Brain, Play, Sparkles } from "lucide-react";
+import { Brain, Play, Sparkles, Mic, MicOff } from "lucide-react";
 import { toast } from "sonner";
+import { useVoiceInput } from "@/lib/useVoice";
 
 export default function NewRun() {
   const [goal, setGoal] = useState("");
@@ -17,6 +18,7 @@ export default function NewRun() {
   const [, setLocation] = useLocation();
   const createRun = useCreateRun();
   const queryClient = useQueryClient();
+  const voice = useVoiceInput((text) => setGoal((g) => (g.trim() ? `${g.trim()} ${text}` : text)));
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -63,7 +65,30 @@ export default function NewRun() {
             </CardHeader>
             <CardContent className="space-y-8">
               <div className="space-y-3">
-                <Label htmlFor="goal" className="text-base">Primary Goal</Label>
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="goal" className="text-base">Primary Goal</Label>
+                  {voice.supported && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={voice.listening ? "default" : "outline"}
+                      onClick={() => (voice.listening ? voice.stop() : voice.start())}
+                      className="h-8"
+                    >
+                      {voice.listening ? (
+                        <>
+                          <MicOff className="w-3.5 h-3.5 mr-1.5" />
+                          Stop
+                        </>
+                      ) : (
+                        <>
+                          <Mic className="w-3.5 h-3.5 mr-1.5" />
+                          Speak
+                        </>
+                      )}
+                    </Button>
+                  )}
+                </div>
                 <Textarea
                   id="goal"
                   placeholder="e.g., Research the implications of quantum computing on cryptography and create a summarized report..."
@@ -71,6 +96,11 @@ export default function NewRun() {
                   value={goal}
                   onChange={(e) => setGoal(e.target.value)}
                 />
+                {voice.listening && (
+                  <p className="text-xs text-primary animate-pulse">
+                    🎙️ Listening… {voice.transcript && <span className="italic">"{voice.transcript}"</span>}
+                  </p>
+                )}
               </div>
 
               <div className="space-y-4">

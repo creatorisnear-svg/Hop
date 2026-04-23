@@ -314,6 +314,36 @@ paths:
               schema:
                 $ref: "#/components/schemas/SleepCycleResult"
 
+  /modulators:
+    get:
+      operationId: getModulators
+      tags: [modulators]
+      summary: Read current global neuromodulator state
+      responses:
+        "200":
+          description: Current modulators
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Modulators"
+    patch:
+      operationId: updateModulators
+      tags: [modulators]
+      summary: Update one or more modulator values
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModulatorsPatch"
+      responses:
+        "200":
+          description: Updated modulators
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Modulators"
+
 components:
   schemas:
     HealthStatus:
@@ -590,3 +620,20 @@ components:
           type: integer
         skippedReason:
           type: string
+
+    Modulators:
+      type: object
+      required: [focus, energy, calm, curiosity]
+      properties:
+        focus: { type: number, minimum: 0, maximum: 1 }
+        energy: { type: number, minimum: 0, maximum: 1 }
+        calm: { type: number, minimum: 0, maximum: 1 }
+        curiosity: { type: number, minimum: 0, maximum: 1 }
+
+    ModulatorsPatch:
+      type: object
+      properties:
+        focus: { type: number, minimum: 0, maximum: 1 }
+        energy: { type: number, minimum: 0, maximum: 1 }
+        calm: { type: number, minimum: 0, maximum: 1 }
+        curiosity: { type: number, minimum: 0, maximum: 1 }

@@ -8,6 +8,7 @@ import { jarvisPlan, jarvisSynthesize, type JarvisPlan, type RegionKey } from ".
 import { planningHint, reinforcePath } from "./synapses";
 import { invokeTool } from "./tools";
 import { noteRunActivity } from "./sleep";
+import { getModulators, effectiveTemperature, effectiveMaxSteps } from "./modulators";
 
 const cancelled = new Set<string>();
 
@@ -63,6 +64,7 @@ async function callRegion(
   region: RegionRow,
   iteration: number,
   userPrompt: string,
+  effectiveTemp: number,
 ): Promise<string> {
   if (!region.enabled) {
     const skip = `[${region.name} disabled — skipped]`;
@@ -82,7 +84,7 @@ async function callRegion(
     baseUrl: region.ollamaUrl,
     model: region.model,
     messages,
-    temperature: region.temperature,
+    temperature: effectiveTemp,
   });
   await recordMessage(runId, region.key, region.role, iteration, result.content, result.latencyMs);
   return result.content;
@@ -139,8 +141,12 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
       Date.now() - planStart,
     );
 
-    // Cap to maxIterations as a safety rail (each step counts as one)
-    const cappedSteps = plan.steps.slice(0, Math.max(maxIterations, plan.steps.length));
+    // ----- Pull current neuromodulator state for this run -----
+    const mods = await getModulators();
+    const adjustedMax = effectiveMaxSteps(maxIterations, mods);
+
+    // Cap to adjusted max as a safety rail (each step counts as one)
+    const cappedSteps = plan.steps.slice(0, Math.max(adjustedMax, plan.steps.length));
 
     // ----- Execute the planned sequence -----
     const synthInputs: { region: RegionKey; instruction: string; output: string }[] = [];
@@ -183,7 +189,8 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
       const prompt =
         `Goal: ${goal}\n\nJarvis instruction for you: ${step.instruction}` +
         (priorContext ? `\n\nWhat earlier regions produced:\n${priorContext}` : "");
-      const output = await callRegion(runId, region, stepIndex, prompt);
+      const effTemp = effectiveTemperature(region.temperature, mods);
+      const output = await callRegion(runId, region, stepIndex, prompt, effTemp);
       synthInputs.push({ region: step.region, instruction: step.instruction, output });
       priorContext +=
         (priorContext ? "\n\n" : "") + `[${step.region}] ${output.slice(0, 1200)}`;
