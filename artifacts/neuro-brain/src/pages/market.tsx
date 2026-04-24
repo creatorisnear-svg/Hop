@@ -1019,7 +1019,12 @@ function LivePriceChart({
       } catch { /* ignore */ }
     };
     void load();
-    const id = setInterval(load, 30_000);
+    // For day-trading on the intraday range we refresh candles every 5s so the
+    // bar shapes (OHLC) stay current with the live tape — not just the last
+    // price. On longer ranges (5D / 1M / etc.) candles change much more slowly,
+    // so 30s is plenty and avoids hammering the upstream quote API.
+    const refreshMs = rangeKey === "1D" ? 5_000 : 30_000;
+    const id = setInterval(load, refreshMs);
     return () => { cancelled = true; clearInterval(id); };
   }, [watch.symbol, rangeKey]);
 
@@ -1097,12 +1102,32 @@ function LivePriceChart({
     const w = containerW;
     const hasForecast = prediction?.targetPrice != null;
     const h = isNarrow ? (hasForecast ? 360 : 320) : (hasForecast ? 460 : 420);
-    const padL = isNarrow ? 44 : 54;
+    // Dynamically size the left gutter so the y-axis price labels never get
+    // clipped. Without this, 6-digit prices like BTC ($79,803.41) lose their
+    // leading digit on mobile and the chart looks wrong even though the data
+    // is correct. We measure the widest label we'll have to render and grow
+    // padL to fit.
+    const candles = series?.candles ?? [];
+    let maxAbs = 0;
+    for (const c of candles) {
+      if (Math.abs(c.h) > maxAbs) maxAbs = Math.abs(c.h);
+      if (Math.abs(c.l) > maxAbs) maxAbs = Math.abs(c.l);
+    }
+    if (livePrice != null && Math.abs(livePrice) > maxAbs) maxAbs = Math.abs(livePrice);
+    if (prediction?.targetPrice != null && Math.abs(prediction.targetPrice) > maxAbs) {
+      maxAbs = Math.abs(prediction.targetPrice);
+    }
+    const sample = maxAbs > 0
+      ? maxAbs.toLocaleString(undefined, { maximumFractionDigits: maxAbs >= 100 ? 2 : 4 })
+      : "0";
+    const charW = isNarrow ? 5.6 : 6.2;
+    const measuredPadL = Math.ceil(sample.length * charW) + 10;
+    const padL = Math.max(isNarrow ? 44 : 54, measuredPadL);
     const padR = isNarrow ? 6 : 22;
     const padT = isNarrow ? 10 : 18;
     const padB = isNarrow ? 22 : 32;
     return { w, h, padL, padR, padT, padB, hasForecast };
-  }, [prediction, containerW, isNarrow]);
+  }, [prediction, containerW, isNarrow, series, livePrice]);
 
   // The live "now" point used to anchor the projection. Falls back to last
   // candle close if we haven't gotten a live tick yet.
@@ -1313,9 +1338,33 @@ function LivePriceChart({
               {livePrice != null ? `${fmtPrice(livePrice)}` : "—"}
               {currency && <span className="text-[10px] sm:text-xs text-muted-foreground ml-1">{currency}</span>}
             </div>
-            <div className={`text-[11px] sm:text-xs ${changeTone}`}>
-              {change != null ? `${change >= 0 ? "+" : ""}${change.toFixed(2)}% today` : ""}
-              {tickAt ? <span className="ml-2 text-muted-foreground hidden sm:inline">· {new Date(tickAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "America/Phoenix" }) + " MST"}</span> : null}
+            <div className={`text-[11px] sm:text-xs ${changeTone} flex items-center justify-end gap-1.5 flex-wrap`}>
+              {change != null ? <span>{`${change >= 0 ? "+" : ""}${change.toFixed(2)}% today`}</span> : null}
+              {tickAt ? (() => {
+                // Live freshness pill — green pulse when ticks are arriving on
+                // schedule (≤5s old), amber if a few seconds behind, red if
+                // we've lost the live feed (>30s). Critical for day-trading
+                // confidence so you never trade off a frozen chart by mistake.
+                const ageSec = Math.max(0, Math.floor((nowMs - tickAt) / 1000));
+                const fresh = ageSec <= 5;
+                const stale = ageSec > 30;
+                const dotColor = fresh ? "bg-emerald-400" : stale ? "bg-red-500" : "bg-amber-400";
+                const ringColor = fresh ? "bg-emerald-400/60" : stale ? "bg-red-500/60" : "bg-amber-400/60";
+                const label = fresh ? "LIVE" : stale ? `STALE ${ageSec}s` : `${ageSec}s ago`;
+                const tone = fresh ? "text-emerald-400" : stale ? "text-red-400" : "text-amber-400";
+                return (
+                  <span className={`inline-flex items-center gap-1 ${tone}`}>
+                    <span className="relative inline-flex h-2 w-2">
+                      {fresh && <span className={`absolute inline-flex h-full w-full rounded-full opacity-70 animate-ping ${ringColor}`} />}
+                      <span className={`relative inline-flex rounded-full h-2 w-2 ${dotColor}`} />
+                    </span>
+                    <span className="font-mono text-[10px] tracking-wide">{label}</span>
+                    <span className="text-muted-foreground font-mono text-[10px] hidden sm:inline">
+                      · {new Date(tickAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "America/Phoenix" })} MST
+                    </span>
+                  </span>
+                );
+              })() : null}
             </div>
           </div>
         </div>
