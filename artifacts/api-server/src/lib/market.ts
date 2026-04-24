@@ -1,11 +1,47 @@
 import { ai } from "@workspace/integrations-gemini-ai";
 import { logger } from "./logger";
 
+export type Sentiment = "BULLISH" | "BEARISH" | "NEUTRAL";
+
 export interface NewsHeadline {
   title: string;
   source: string;
   link: string;
   publishedAt: string;
+  sentiment?: Sentiment;
+}
+
+export interface IndicatorsResult {
+  symbol: string;
+  price: number | null;
+  change1d: number | null;
+  change5d: number | null;
+  change1m: number | null;
+  sma20: number | null;
+  sma50: number | null;
+  rsi14: number | null;
+  high52w: number | null;
+  low52w: number | null;
+  volatility20d: number | null;
+  asOf: string;
+}
+
+export type EvaluationStatus =
+  | "PENDING"        // horizon not yet elapsed AND we have no measurable move yet
+  | "ON_TRACK"       // horizon not elapsed but price already moving the right way
+  | "OFF_TRACK"      // horizon not elapsed but price moving wrong way
+  | "CORRECT"        // horizon elapsed, direction matched
+  | "WRONG"          // horizon elapsed, direction wrong
+  | "TARGET_HIT"     // price reached/exceeded targetPrice in the predicted direction
+  | "NO_ENTRY";      // we never recorded an entry price
+
+export interface PredictionEvaluation {
+  status: EvaluationStatus;
+  entryPrice: number | null;
+  currentPrice: number | null;
+  deltaPct: number | null;
+  reachedTarget: boolean;
+  isDue: boolean;
 }
 
 export interface MarketQuote {
@@ -323,6 +359,7 @@ Respond with STRICT JSON only, matching this shape:
   "entryTrigger": "<one short observable condition to enter>",
   "riskNote": "<one short sentence on what would invalidate the trade>",
   "targetPrice": <number — your projected price for the asset at the END of the horizon, used to draw a forecast line on the chart>,
+  "headlineSentiments": [<one entry per headline above in order: "BULLISH" | "BEARISH" | "NEUTRAL">],
   "summary": "<one-sentence punchy verdict>",
   "reasoning": "<3-6 sentences citing the headlines by [n] when possible>"
 }
@@ -382,6 +419,14 @@ Rules:
       if (typeof parsed.riskNote === "string") riskNote = parsed.riskNote.trim();
       const tp = Number(parsed.targetPrice);
       if (Number.isFinite(tp) && tp > 0) targetPrice = tp;
+      if (Array.isArray(parsed.headlineSentiments)) {
+        for (let i = 0; i < headlines.length; i++) {
+          const s = String(parsed.headlineSentiments[i] ?? "").toUpperCase();
+          if (s === "BULLISH" || s === "BEARISH" || s === "NEUTRAL") {
+            headlines[i].sentiment = s;
+          }
+        }
+      }
     } else {
       // Truncated / malformed JSON — recover the fields with regex.
       const dirM = text.match(/"direction"\s*:\s*"([A-Z_]+)"/i);
@@ -427,6 +472,9 @@ Rules:
       else if (direction === "BEARISH") targetPrice = quote.price * (1 - magnitude);
       else targetPrice = quote.price;
     }
+
+    // Tie sentiments to a quick bullish/bearish/neutral count signal we can show.
+    // (No-op for storage — the headline objects already carry .sentiment.)
   } catch (err) {
     logger.error({ err, symbol: args.symbol }, "market prediction failed");
     throw err instanceof Error ? err : new Error(String(err));
@@ -448,5 +496,111 @@ Rules:
     targetPrice,
     model: MODEL,
     durationMs: Date.now() - start,
+  };
+}
+
+const HORIZON_MS: Record<string, number> = {
+  "1d": 24 * 3600_000,
+  "1w": 7 * 24 * 3600_000,
+  "1m": 30 * 24 * 3600_000,
+  "3m": 90 * 24 * 3600_000,
+};
+
+export function evaluatePrediction(
+  p: {
+    direction: string;
+    horizon: string;
+    targetPrice: number | null;
+    quote: MarketQuote | null;
+    createdAt: Date | string;
+  },
+  currentPrice: number | null,
+): PredictionEvaluation {
+  const entry = p.quote?.price ?? null;
+  const horizonMs = HORIZON_MS[p.horizon] ?? HORIZON_MS["1w"];
+  const created = new Date(p.createdAt).getTime();
+  const isDue = Date.now() - created >= horizonMs;
+
+  if (entry == null || currentPrice == null) {
+    return { status: entry == null ? "NO_ENTRY" : "PENDING", entryPrice: entry, currentPrice, deltaPct: null, reachedTarget: false, isDue };
+  }
+
+  const deltaPct = ((currentPrice - entry) / entry) * 100;
+  const dir = p.direction;
+  // Did the live price already touch / exceed the target in the right direction?
+  let reachedTarget = false;
+  if (p.targetPrice != null) {
+    if (dir === "BULLISH") reachedTarget = currentPrice >= p.targetPrice;
+    else if (dir === "BEARISH") reachedTarget = currentPrice <= p.targetPrice;
+  }
+
+  // Direction-correctness threshold: 0.5% to ignore noise
+  const noise = 0.5;
+  let correct: boolean;
+  if (dir === "BULLISH") correct = deltaPct > noise;
+  else if (dir === "BEARISH") correct = deltaPct < -noise;
+  else correct = Math.abs(deltaPct) <= 2; // NEUTRAL: within ±2%
+
+  let status: EvaluationStatus;
+  if (reachedTarget) status = "TARGET_HIT";
+  else if (isDue) status = correct ? "CORRECT" : "WRONG";
+  else status = correct ? "ON_TRACK" : "OFF_TRACK";
+
+  return { status, entryPrice: entry, currentPrice, deltaPct, reachedTarget, isDue };
+}
+
+export function computeIndicators(symbol: string, dailyCloses: number[]): IndicatorsResult {
+  const last = dailyCloses.length ? dailyCloses[dailyCloses.length - 1] : null;
+  const change = (n: number): number | null => {
+    if (last == null || dailyCloses.length <= n) return null;
+    const prev = dailyCloses[dailyCloses.length - 1 - n];
+    return prev ? ((last - prev) / prev) * 100 : null;
+  };
+  const sma = (n: number): number | null => {
+    if (dailyCloses.length < n) return null;
+    let sum = 0;
+    for (let i = dailyCloses.length - n; i < dailyCloses.length; i++) sum += dailyCloses[i];
+    return sum / n;
+  };
+  const rsi = (n: number): number | null => {
+    if (dailyCloses.length < n + 1) return null;
+    let gains = 0;
+    let losses = 0;
+    for (let i = dailyCloses.length - n; i < dailyCloses.length; i++) {
+      const d = dailyCloses[i] - dailyCloses[i - 1];
+      if (d >= 0) gains += d; else losses -= d;
+    }
+    const avgGain = gains / n;
+    const avgLoss = losses / n;
+    if (avgLoss === 0) return 100;
+    const rs = avgGain / avgLoss;
+    return 100 - 100 / (1 + rs);
+  };
+  const volatility = (n: number): number | null => {
+    if (dailyCloses.length < n + 1) return null;
+    const rets: number[] = [];
+    for (let i = dailyCloses.length - n; i < dailyCloses.length; i++) {
+      const d = dailyCloses[i - 1];
+      if (d) rets.push((dailyCloses[i] - d) / d);
+    }
+    if (!rets.length) return null;
+    const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+    const variance = rets.reduce((a, b) => a + (b - mean) ** 2, 0) / rets.length;
+    return Math.sqrt(variance) * 100;
+  };
+  const window52 = dailyCloses.slice(-252);
+  return {
+    symbol,
+    price: last,
+    change1d: change(1),
+    change5d: change(5),
+    change1m: change(21),
+    sma20: sma(20),
+    sma50: sma(50),
+    rsi14: rsi(14),
+    high52w: window52.length ? Math.max(...window52) : null,
+    low52w: window52.length ? Math.min(...window52) : null,
+    volatility20d: volatility(20),
+    asOf: new Date().toISOString(),
   };
 }

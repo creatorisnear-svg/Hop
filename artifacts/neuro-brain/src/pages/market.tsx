@@ -76,6 +76,15 @@ interface Prediction {
   model: string;
   durationMs: number;
   createdAt: string;
+  evaluation?: PredictionEvaluation;
+}
+
+interface HeadlineWithSentiment {
+  title: string;
+  source: string;
+  link: string;
+  publishedAt: string;
+  sentiment?: "BULLISH" | "BEARISH" | "NEUTRAL";
 }
 
 interface CandleSeries {
@@ -86,6 +95,44 @@ interface CandleSeries {
   marketState: string | null;
   previousClose: number | null;
   candles: { t: number; c: number }[];
+}
+
+type EvalStatus =
+  | "PENDING" | "ON_TRACK" | "OFF_TRACK"
+  | "CORRECT" | "WRONG" | "TARGET_HIT" | "NO_ENTRY";
+
+interface PredictionEvaluation {
+  status: EvalStatus;
+  entryPrice: number | null;
+  currentPrice: number | null;
+  deltaPct: number | null;
+  reachedTarget: boolean;
+  isDue: boolean;
+}
+
+interface TrackRecord {
+  total: number;
+  correct: number;
+  accuracy: number | null;
+  byDirection: Record<string, { total: number; correct: number }>;
+  byAction: Record<string, { total: number; correct: number }>;
+  live: { onTrack: number; offTrack: number; targetHits: number };
+  currentPrice: number | null;
+}
+
+interface Indicators {
+  symbol: string;
+  price: number | null;
+  change1d: number | null;
+  change5d: number | null;
+  change1m: number | null;
+  sma20: number | null;
+  sma50: number | null;
+  rsi14: number | null;
+  high52w: number | null;
+  low52w: number | null;
+  volatility20d: number | null;
+  asOf: string;
 }
 
 const MARKET_OPTIONS = [
@@ -318,6 +365,8 @@ function WatchList({
 
 function WatchDetail({ watch }: { watch: Watch }) {
   const [predictions, setPredictions] = useState<Prediction[]>([]);
+  const [trackRecord, setTrackRecord] = useState<TrackRecord | null>(null);
+  const [indicators, setIndicators] = useState<Indicators | null>(null);
   const [loading, setLoading] = useState(true);
   const [predicting, setPredicting] = useState(false);
   const [horizon, setHorizon] = useState("1w");
@@ -325,15 +374,31 @@ function WatchDetail({ watch }: { watch: Watch }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await fetch(`/api/market/watches/${watch.id}/predictions`);
-      const data = await r.json();
-      setPredictions(data.predictions ?? []);
+      const [predRes, indRes] = await Promise.all([
+        fetch(`/api/market/watches/${watch.id}/predictions`),
+        fetch(`/api/market/indicators/${encodeURIComponent(watch.symbol)}`),
+      ]);
+      const predData = await predRes.json();
+      setPredictions(predData.predictions ?? []);
+      setTrackRecord(predData.trackRecord ?? null);
+      if (indRes.ok) {
+        const indData = await indRes.json();
+        setIndicators(indData.indicators ?? null);
+      } else {
+        setIndicators(null);
+      }
     } finally {
       setLoading(false);
     }
-  }, [watch.id]);
+  }, [watch.id, watch.symbol]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // Auto-refresh evaluations every 30s so badges flip live as the price moves.
+  useEffect(() => {
+    const id = setInterval(() => { void load(); }, 30_000);
+    return () => clearInterval(id);
+  }, [load]);
 
   const runPredict = useCallback(async () => {
     setPredicting(true);
@@ -398,6 +463,11 @@ function WatchDetail({ watch }: { watch: Watch }) {
       </Card>
 
       <LivePriceChart watch={watch} prediction={latest ?? null} />
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <TrackRecordCard track={trackRecord} loading={loading} />
+        <IndicatorsCard indicators={indicators} loading={loading} />
+      </div>
 
       {latest && <PredictionCard prediction={latest} headline />}
 
@@ -675,6 +745,225 @@ function LivePriceChart({
   );
 }
 
+function evalMeta(s: EvalStatus | undefined) {
+  switch (s) {
+    case "CORRECT": return { label: "✓ Correct", tone: "bg-green-500/15 text-green-400 border-green-500/40" };
+    case "TARGET_HIT": return { label: "★ Target hit", tone: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40" };
+    case "WRONG": return { label: "✗ Wrong", tone: "bg-red-500/15 text-red-400 border-red-500/40" };
+    case "ON_TRACK": return { label: "↗ On track", tone: "bg-green-500/10 text-green-300 border-green-500/30" };
+    case "OFF_TRACK": return { label: "↘ Off track", tone: "bg-red-500/10 text-red-300 border-red-500/30" };
+    case "PENDING": return { label: "⏳ Pending", tone: "bg-muted text-muted-foreground border-border" };
+    case "NO_ENTRY": return { label: "n/a", tone: "bg-muted text-muted-foreground border-border" };
+    default: return { label: "—", tone: "bg-muted text-muted-foreground border-border" };
+  }
+}
+
+function TrackRecordCard({ track, loading }: { track: TrackRecord | null; loading: boolean }) {
+  const accPct = track?.accuracy != null ? Math.round(track.accuracy * 100) : null;
+  const accTone =
+    accPct == null ? "text-muted-foreground"
+    : accPct >= 65 ? "text-green-400"
+    : accPct >= 50 ? "text-amber-300"
+    : "text-red-400";
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base flex items-center gap-2">
+          <Sparkles className="w-4 h-4 text-primary" /> Track record
+        </CardTitle>
+        <CardDescription>How often this predictor has been right on {track ? "settled" : "past"} calls.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {loading && !track ? (
+          <div className="text-sm text-muted-foreground">Loading…</div>
+        ) : !track || track.total === 0 ? (
+          <div className="space-y-2">
+            <div className={`text-3xl font-bold ${accTone}`}>—</div>
+            <div className="text-xs text-muted-foreground">
+              No predictions have settled yet (need horizon to elapse). Live status of open calls is shown below.
+            </div>
+            {track && (
+              <div className="flex flex-wrap gap-2 pt-2 text-xs">
+                <Badge variant="outline" className="text-green-300 border-green-500/40">
+                  ↗ On track: {track.live.onTrack}
+                </Badge>
+                <Badge variant="outline" className="text-red-300 border-red-500/40">
+                  ↘ Off track: {track.live.offTrack}
+                </Badge>
+                <Badge variant="outline" className="text-emerald-300 border-emerald-500/40">
+                  ★ Target hit: {track.live.targetHits}
+                </Badge>
+              </div>
+            )}
+          </div>
+        ) : (
+          <>
+            <div className="flex items-baseline gap-3">
+              <div className={`text-4xl font-bold tabular-nums ${accTone}`}>{accPct}%</div>
+              <div className="text-sm text-muted-foreground">
+                {track.correct}/{track.total} settled correctly
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              {(["BULLISH", "BEARISH", "NEUTRAL"] as const).map((d) => {
+                const row = track.byDirection[d];
+                const pct = row.total ? Math.round((row.correct / row.total) * 100) : null;
+                return (
+                  <div key={d} className="rounded border border-border/60 px-2 py-1.5 bg-muted/30">
+                    <div className="text-[10px] uppercase text-muted-foreground">{d}</div>
+                    <div className="font-mono text-sm">
+                      {pct != null ? `${pct}%` : "—"}
+                      <span className="text-muted-foreground text-[11px] ml-1">({row.correct}/{row.total})</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              {(["BUY_CALL", "BUY_PUT", "HOLD"] as const).map((a) => {
+                const row = track.byAction[a];
+                const pct = row.total ? Math.round((row.correct / row.total) * 100) : null;
+                return (
+                  <div key={a} className="rounded border border-border/60 px-2 py-1.5 bg-muted/30">
+                    <div className="text-[10px] uppercase text-muted-foreground">{a.replace("_"," ")}</div>
+                    <div className="font-mono text-sm">
+                      {pct != null ? `${pct}%` : "—"}
+                      <span className="text-muted-foreground text-[11px] ml-1">({row.correct}/{row.total})</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex flex-wrap gap-2 text-xs pt-1">
+              <Badge variant="outline" className="text-green-300 border-green-500/40">↗ Open on track: {track.live.onTrack}</Badge>
+              <Badge variant="outline" className="text-red-300 border-red-500/40">↘ Open off track: {track.live.offTrack}</Badge>
+              <Badge variant="outline" className="text-emerald-300 border-emerald-500/40">★ Target hits: {track.live.targetHits}</Badge>
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function IndicatorsCard({ indicators, loading }: { indicators: Indicators | null; loading: boolean }) {
+  const fmt = (v: number | null, opts?: { pct?: boolean; digits?: number }) =>
+    v == null ? "—" : `${v.toFixed(opts?.digits ?? 2)}${opts?.pct ? "%" : ""}`;
+  const tone = (v: number | null) => v == null ? "text-muted-foreground" : v >= 0 ? "text-green-400" : "text-red-400";
+  const rsiTone = (v: number | null) =>
+    v == null ? "text-muted-foreground"
+    : v >= 70 ? "text-red-400"
+    : v <= 30 ? "text-green-400"
+    : "text-foreground";
+  const rsiHint = (v: number | null) =>
+    v == null ? "" : v >= 70 ? "overbought" : v <= 30 ? "oversold" : "neutral";
+
+  // Where is price in its 52-week range? (0% = at 52w low, 100% = at 52w high)
+  const pos52 =
+    indicators?.price && indicators.high52w && indicators.low52w && indicators.high52w > indicators.low52w
+      ? ((indicators.price - indicators.low52w) / (indicators.high52w - indicators.low52w)) * 100
+      : null;
+
+  // Trend from SMA cross
+  let trend: { label: string; tone: string } | null = null;
+  if (indicators?.sma20 != null && indicators.sma50 != null && indicators.price != null) {
+    if (indicators.price > indicators.sma20 && indicators.sma20 > indicators.sma50) {
+      trend = { label: "Uptrend (price > 20 > 50)", tone: "text-green-400" };
+    } else if (indicators.price < indicators.sma20 && indicators.sma20 < indicators.sma50) {
+      trend = { label: "Downtrend (price < 20 < 50)", tone: "text-red-400" };
+    } else {
+      trend = { label: "Mixed / consolidating", tone: "text-amber-300" };
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base flex items-center gap-2">
+          <LineChart className="w-4 h-4 text-primary" /> Technical context
+        </CardTitle>
+        <CardDescription>Quick-glance signals to sanity-check the AI's call.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        {loading && !indicators ? (
+          <div className="text-sm text-muted-foreground">Loading…</div>
+        ) : !indicators ? (
+          <div className="text-sm text-muted-foreground italic">Indicators unavailable for this symbol.</div>
+        ) : (
+          <>
+            <div className="grid grid-cols-3 gap-2">
+              <div className="rounded border border-border/60 px-2 py-1.5 bg-muted/30">
+                <div className="text-[10px] uppercase text-muted-foreground">1d</div>
+                <div className={`font-mono ${tone(indicators.change1d)}`}>{fmt(indicators.change1d, { pct: true })}</div>
+              </div>
+              <div className="rounded border border-border/60 px-2 py-1.5 bg-muted/30">
+                <div className="text-[10px] uppercase text-muted-foreground">5d</div>
+                <div className={`font-mono ${tone(indicators.change5d)}`}>{fmt(indicators.change5d, { pct: true })}</div>
+              </div>
+              <div className="rounded border border-border/60 px-2 py-1.5 bg-muted/30">
+                <div className="text-[10px] uppercase text-muted-foreground">1m</div>
+                <div className={`font-mono ${tone(indicators.change1m)}`}>{fmt(indicators.change1m, { pct: true })}</div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div className="rounded border border-border/60 px-2 py-1.5 bg-muted/30">
+                <div className="text-[10px] uppercase text-muted-foreground">SMA 20</div>
+                <div className="font-mono">{fmt(indicators.sma20)}</div>
+              </div>
+              <div className="rounded border border-border/60 px-2 py-1.5 bg-muted/30">
+                <div className="text-[10px] uppercase text-muted-foreground">SMA 50</div>
+                <div className="font-mono">{fmt(indicators.sma50)}</div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div className="rounded border border-border/60 px-2 py-1.5 bg-muted/30">
+                <div className="text-[10px] uppercase text-muted-foreground">RSI 14</div>
+                <div className={`font-mono ${rsiTone(indicators.rsi14)}`}>
+                  {fmt(indicators.rsi14, { digits: 1 })}
+                  <span className="text-muted-foreground text-[10px] ml-1">{rsiHint(indicators.rsi14)}</span>
+                </div>
+              </div>
+              <div className="rounded border border-border/60 px-2 py-1.5 bg-muted/30">
+                <div className="text-[10px] uppercase text-muted-foreground">Volatility (20d)</div>
+                <div className="font-mono">{fmt(indicators.volatility20d, { pct: true, digits: 2 })}</div>
+              </div>
+            </div>
+
+            {pos52 != null && (
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-muted-foreground">52-week range</span>
+                  <span className="font-mono">
+                    {fmt(indicators.low52w)} – {fmt(indicators.high52w)}
+                  </span>
+                </div>
+                <div className="h-2 rounded-full bg-muted overflow-hidden relative">
+                  <div className="absolute inset-y-0 left-0 bg-gradient-to-r from-red-500/40 via-amber-300/40 to-green-500/40 w-full" />
+                  <div
+                    className="absolute top-1/2 -translate-y-1/2 w-2 h-3 bg-foreground rounded-sm"
+                    style={{ left: `calc(${pos52.toFixed(1)}% - 4px)` }}
+                  />
+                </div>
+                <div className="text-[10px] text-muted-foreground text-right">
+                  Price at {pos52.toFixed(0)}% of 52w range
+                </div>
+              </div>
+            )}
+
+            {trend && (
+              <div className={`text-xs font-medium ${trend.tone}`}>
+                Trend: {trend.label}
+              </div>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function actionMeta(a: TradeAction) {
   if (a === "BUY_CALL") return {
     label: "BUY CALL",
@@ -711,6 +1000,17 @@ function PredictionCard({ prediction, headline }: { prediction: Prediction; head
           </div>
           <Badge variant="outline" className="text-[10px] uppercase">Horizon {prediction.horizon}</Badge>
           <Badge variant="outline" className="text-[10px]">Confidence {pct}%</Badge>
+          {prediction.evaluation && (
+            <Badge variant="outline" className={`text-[10px] ${evalMeta(prediction.evaluation.status).tone}`}>
+              {evalMeta(prediction.evaluation.status).label}
+              {prediction.evaluation.deltaPct != null && (
+                <span className="ml-1 opacity-80 font-mono">
+                  {prediction.evaluation.deltaPct >= 0 ? "+" : ""}
+                  {prediction.evaluation.deltaPct.toFixed(2)}%
+                </span>
+              )}
+            </Badge>
+          )}
           <span className="text-xs text-muted-foreground ml-auto">
             {new Date(prediction.createdAt).toLocaleString()}
           </span>
@@ -766,21 +1066,31 @@ function PredictionCard({ prediction, headline }: { prediction: Prediction; head
               <Newspaper className="w-3.5 h-3.5" /> Headlines used
             </div>
             <ul className="space-y-1">
-              {prediction.headlines.map((h, i) => (
-                <li key={i} className="text-xs flex items-start gap-2">
-                  <span className="text-muted-foreground font-mono">[{i + 1}]</span>
-                  <a
-                    href={h.link}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="hover:underline text-foreground/90 flex-1"
-                  >
-                    {h.title}
-                    {h.source && <span className="text-muted-foreground"> · {h.source}</span>}
-                    <ExternalLink className="inline w-3 h-3 ml-1 opacity-60" />
-                  </a>
-                </li>
-              ))}
+              {(prediction.headlines as HeadlineWithSentiment[]).map((h, i) => {
+                const sentTone =
+                  h.sentiment === "BULLISH" ? "bg-green-500" :
+                  h.sentiment === "BEARISH" ? "bg-red-500" :
+                  h.sentiment === "NEUTRAL" ? "bg-amber-300" : "bg-muted-foreground/30";
+                return (
+                  <li key={i} className="text-xs flex items-start gap-2">
+                    <span className="text-muted-foreground font-mono">[{i + 1}]</span>
+                    <span
+                      title={h.sentiment ?? "no sentiment"}
+                      className={`mt-1 w-2 h-2 rounded-full flex-shrink-0 ${sentTone}`}
+                    />
+                    <a
+                      href={h.link}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="hover:underline text-foreground/90 flex-1"
+                    >
+                      {h.title}
+                      {h.source && <span className="text-muted-foreground"> · {h.source}</span>}
+                      <ExternalLink className="inline w-3 h-3 ml-1 opacity-60" />
+                    </a>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         )}
