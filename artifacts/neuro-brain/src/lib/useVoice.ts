@@ -90,8 +90,54 @@ function waitForVoices(): Promise<void> {
   return voicesReadyPromise;
 }
 
+// Cache the ElevenLabs availability check so we don't probe on every call.
+let elevenAvailable: boolean | null = null;
+let currentAudio: HTMLAudioElement | null = null;
+
+async function checkEleven(): Promise<boolean> {
+  if (elevenAvailable !== null) return elevenAvailable;
+  try {
+    const r = await fetch("/api/jarvis/voice-status");
+    const j = await r.json();
+    elevenAvailable = Boolean(j.enabled);
+  } catch {
+    elevenAvailable = false;
+  }
+  return elevenAvailable;
+}
+
+async function speakWithEleven(text: string, opts: { onStart?: () => void; onEnd?: () => void }): Promise<boolean> {
+  try {
+    const r = await fetch("/api/jarvis/speak", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!r.ok) return false;
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    if (currentAudio) {
+      currentAudio.pause();
+      currentAudio.src = "";
+    }
+    const audio = new Audio(url);
+    currentAudio = audio;
+    audio.onplay = () => opts.onStart?.();
+    const cleanup = () => {
+      URL.revokeObjectURL(url);
+      if (currentAudio === audio) currentAudio = null;
+      opts.onEnd?.();
+    };
+    audio.onended = cleanup;
+    audio.onerror = cleanup;
+    await audio.play();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function speak(text: string, opts: { rate?: number; pitch?: number; onStart?: () => void; onEnd?: () => void } = {}): void {
-  if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
   const stripped = text
     .replace(/```[\s\S]*?```/g, " (code block) ")
     .replace(/[#*_>`~]/g, "")
@@ -99,6 +145,24 @@ export function speak(text: string, opts: { rate?: number; pitch?: number; onSta
     .trim();
   if (!stripped) return;
 
+  // Try ElevenLabs first; fall back to browser SpeechSynthesis on any failure.
+  void (async () => {
+    const hasEleven = await checkEleven();
+    if (hasEleven) {
+      const ok = await speakWithEleven(stripped, opts);
+      if (ok) return;
+      // ElevenLabs failed at runtime — invalidate cache and fall through
+      elevenAvailable = null;
+    }
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      opts.onEnd?.();
+      return;
+    }
+    speakWithBrowser(stripped, opts);
+  })();
+}
+
+function speakWithBrowser(stripped: string, opts: { rate?: number; pitch?: number; onStart?: () => void; onEnd?: () => void }): void {
   const utter = () => {
     const u = new SpeechSynthesisUtterance(stripped.slice(0, 1500));
     // Calm, slightly lower-pitched butler cadence
@@ -128,6 +192,11 @@ export function speak(text: string, opts: { rate?: number; pitch?: number; onSta
 }
 
 export function stopSpeaking(): void {
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.src = "";
+    currentAudio = null;
+  }
   if (typeof window !== "undefined" && "speechSynthesis" in window) {
     window.speechSynthesis.cancel();
   }

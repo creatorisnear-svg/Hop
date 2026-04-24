@@ -14,6 +14,7 @@ import jarvisMemoryRouter from "./jarvisMemory";
 import imagesRouter from "./images";
 import keysRouter from "./keys";
 import jarvisActionsRouter from "./jarvisActions";
+import jarvisVoiceRouter from "./jarvisVoice";
 
 const router: IRouter = Router();
 
@@ -32,5 +33,6 @@ router.use(jarvisMemoryRouter);
 router.use(imagesRouter);
 router.use(keysRouter);
 router.use(jarvisActionsRouter);
+router.use(jarvisVoiceRouter);
 
 export default router;
