@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Layout } from "@/components/layout";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -229,20 +229,22 @@ export default function MarketPage() {
 
   return (
     <Layout>
-      <div className="space-y-8">
+      <div className="space-y-6 lg:space-y-8">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight mb-2 flex items-center gap-3">
-            <LineChart className="w-7 h-7 text-primary" />
+          <h1 className="text-2xl sm:text-3xl font-bold tracking-tight mb-1.5 sm:mb-2 flex items-center gap-2 sm:gap-3">
+            <LineChart className="w-6 h-6 sm:w-7 sm:h-7 text-primary" />
             Market Predictor
           </h1>
-          <p className="text-muted-foreground">
+          <p className="text-sm sm:text-base text-muted-foreground">
             Pick a market to watch. The brain pulls fresh news plus a live quote, then asks
             Gemini for a directional forecast you can rerun on demand.
           </p>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-6">
-          <div className="space-y-6">
+        <div className="grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-4 lg:gap-6">
+          {/* On mobile we put the detail FIRST (with a compact watch picker)
+              so the user lands on the chart, not on the form. */}
+          <div className="space-y-4 lg:space-y-6 order-2 lg:order-1">
             <AddWatchForm onAdded={(w) => { setWatches((prev) => [w, ...prev]); setSelectedId(w.id); }} />
             <WatchList
               watches={watches}
@@ -252,13 +254,32 @@ export default function MarketPage() {
               onRemove={removeWatch}
             />
           </div>
-          <div>
+          <div className="order-1 lg:order-2 min-w-0">
+            {watches.length > 0 && (
+              <div className="lg:hidden mb-3">
+                <Select value={selectedId ?? undefined} onValueChange={(v) => setSelectedId(v)}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="Choose a market" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {watches.map((w) => (
+                      <SelectItem key={w.id} value={w.id}>
+                        <span className="font-mono font-semibold">{w.symbol}</span>
+                        <span className="text-muted-foreground ml-2">{w.name}</span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             {selected ? (
               <WatchDetail watch={selected} />
             ) : (
               <Card>
-                <CardContent className="py-16 text-center text-muted-foreground">
-                  Select or add a market on the left to start predicting.
+                <CardContent className="py-12 sm:py-16 text-center text-muted-foreground text-sm">
+                  {watches.length === 0
+                    ? "Add a market below to start predicting."
+                    : "Pick a market to see its chart and forecast."}
                 </CardContent>
               </Card>
             )}
@@ -492,37 +513,37 @@ function WatchDetail({ watch }: { watch: Watch }) {
   return (
     <div className="space-y-6">
       <Card>
-        <CardHeader>
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <CardTitle className="flex items-center gap-2">
+        <CardHeader className="pb-4">
+          <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-start sm:justify-between gap-3">
+            <div className="min-w-0">
+              <CardTitle className="flex items-center gap-2 flex-wrap">
                 <span className="font-mono">{watch.symbol}</span>
-                <span className="text-base text-muted-foreground font-normal">· {watch.name}</span>
+                <span className="text-sm sm:text-base text-muted-foreground font-normal truncate">· {watch.name}</span>
               </CardTitle>
-              <CardDescription className="mt-1">
-                {watch.market.toUpperCase()} watch · added {new Date(watch.createdAt).toLocaleString()}
+              <CardDescription className="mt-1 text-xs sm:text-sm">
+                {watch.market.toUpperCase()} watch · added {new Date(watch.createdAt).toLocaleDateString()}
               </CardDescription>
               {watch.notes && (
-                <p className="text-xs text-muted-foreground mt-2 italic">“{watch.notes}”</p>
+                <p className="text-xs text-muted-foreground mt-2 italic line-clamp-2">“{watch.notes}”</p>
               )}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 w-full sm:w-auto">
               <Select value={horizon} onValueChange={setHorizon}>
-                <SelectTrigger className="w-[120px]"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="flex-1 sm:flex-initial sm:w-[120px]"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {HORIZON_OPTIONS.map((h) => (
                     <SelectItem key={h.value} value={h.value}>{h.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-              <Button onClick={runPredict} disabled={predicting}>
+              <Button onClick={runPredict} disabled={predicting} className="flex-1 sm:flex-initial">
                 {predicting ? (
-                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Predicting…</>
+                  <><Loader2 className="w-4 h-4 sm:mr-2 animate-spin" /><span className="hidden sm:inline">Predicting…</span></>
                 ) : (
-                  <><Sparkles className="w-4 h-4 mr-2" /> Predict now</>
+                  <><Sparkles className="w-4 h-4 sm:mr-2" /><span className="hidden sm:inline">Predict now</span><span className="sm:hidden">Predict</span></>
                 )}
               </Button>
-              <Button variant="ghost" size="icon" onClick={() => void load()}>
+              <Button variant="ghost" size="icon" onClick={() => void load()} className="shrink-0">
                 <RefreshCw className="w-4 h-4" />
               </Button>
             </div>
@@ -612,6 +633,26 @@ function LivePriceChart({
   const [tickAt, setTickAt] = useState<number>(0);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
+  // Track real pixel size of the chart container so the SVG renders at 1:1
+  // and we don't get the "letterboxed and squashed" look on phones (which is
+  // what `preserveAspectRatio` defaults to with a fixed-aspect viewBox).
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerW, setContainerW] = useState(760);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    setContainerW(Math.max(280, Math.floor(el.getBoundingClientRect().width)));
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const w = Math.max(280, Math.floor(entry.contentRect.width));
+        setContainerW((prev) => (Math.abs(prev - w) > 1 ? w : prev));
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const isNarrow = containerW < 520;
+
   // Fetch base candles for the chosen range every 30s.
   useEffect(() => {
     let cancelled = false;
@@ -700,16 +741,26 @@ function LivePriceChart({
   const horizon = prediction?.horizon ?? "1w";
   const projectionMs = HORIZON_MS[horizon] ?? HORIZON_MS["1w"];
 
-  // Layout: 760×280 viewBox. If we have a prediction, split into a 70% history
-  // panel and a 30% forecast panel — each with its OWN y-scale so today's tiny
-  // moves don't get squashed by a far-away forecast target.
+  // Layout: viewBox is sized to the actual container in real pixels, so the
+  // SVG renders 1:1 with no scaling — no squashed candles on phones. If we
+  // have a prediction we split into a 70% history panel and a 30% forecast
+  // panel, each with its OWN y-scale so today's tiny moves don't get crushed
+  // by a far-away forecast target.
   const dims = useMemo(() => {
-    const w = 760, h = 280, padL = 50, padR = 18, padT = 12, padB = 28;
+    const w = containerW;
+    const h = isNarrow ? 220 : 280;
+    const padL = isNarrow ? 36 : 50;
+    const padR = isNarrow ? 10 : 18;
+    const padT = isNarrow ? 8 : 12;
+    const padB = isNarrow ? 22 : 28;
     const inner = w - padL - padR;
     const hasForecast = prediction?.targetPrice != null;
-    const splitX = hasForecast ? padL + inner * 0.7 : w - padR;
+    // On very narrow screens give the forecast a slightly bigger slice so the
+    // target dot + label aren't squeezed against the edge.
+    const splitFrac = isNarrow ? 0.62 : 0.7;
+    const splitX = hasForecast ? padL + inner * splitFrac : w - padR;
     return { w, h, padL, padR, padT, padB, hasForecast, splitX };
-  }, [prediction]);
+  }, [prediction, containerW, isNarrow]);
 
   const histView = useMemo(() => {
     if (histCandles.length === 0) return null;
@@ -832,12 +883,19 @@ function LivePriceChart({
         </div>
       </CardHeader>
       <CardContent>
+        <div ref={containerRef} className="w-full" style={{ height: dims.h }}>
         {!histView ? (
-          <div className="h-[280px] flex items-center justify-center text-sm text-muted-foreground">
+          <div className="w-full h-full flex items-center justify-center text-sm text-muted-foreground">
             Loading market data…
           </div>
         ) : (
-          <svg viewBox={`0 0 ${dims.w} ${dims.h}`} className="w-full h-[280px]">
+          <svg
+            viewBox={`0 0 ${dims.w} ${dims.h}`}
+            width={dims.w}
+            height={dims.h}
+            preserveAspectRatio="none"
+            className="block"
+          >
             {/* HISTORY PANEL */}
             {/* horizontal grid */}
             {[0.25, 0.5, 0.75].map((f) => {
@@ -1028,6 +1086,7 @@ function LivePriceChart({
             )}
           </svg>
         )}
+        </div>
         {prediction?.targetPrice && livePrice != null && (
           <div className="mt-2 text-xs text-muted-foreground flex items-center gap-3 flex-wrap">
             <span>
