@@ -601,6 +601,29 @@ const _AUTONOMY_TOOLS_DOCS_ONLY: Array<{ name: string; description: string; para
 // Touch the docs-only array so TS doesn't warn about it being unused.
 void _AUTONOMY_TOOLS_DOCS_ONLY;
 
+// Fast-path: read-only autonomy tools are exposed directly to Jarvis-chat so
+// trivial questions ("what's deployed?", "show me the logs") don't pay for a
+// full 6-region brain run. Every write/mutating action still goes through
+// start_run → brain pipeline (see system prompt). Audit + kill-switch still
+// apply because we delegate via invokeTool.
+const READ_ONLY_AUTONOMY = _AUTONOMY_TOOLS_DOCS_ONLY.filter((t) =>
+  ["github_list_commits", "github_read_file", "koyeb_list_services", "koyeb_get_logs"].includes(
+    t.name,
+  ),
+);
+for (const t of READ_ONLY_AUTONOMY) {
+  reg({
+    name: t.name,
+    description: t.description + " (Read-only fast-path: callable directly from chat without a brain run.)",
+    parameters: t.parameters,
+    async run(args) {
+      const result = await invokeTool(t.name, args);
+      if (!result.ok) throw new Error(result.error ?? "tool failed");
+      return result.result;
+    },
+  });
+}
+
 export function listJarvisTools(): JarvisTool[] {
   return [...tools];
 }
