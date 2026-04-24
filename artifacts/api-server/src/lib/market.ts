@@ -350,166 +350,232 @@ function quarterFromDate(d: Date): string {
   return "Q4";
 }
 
+// Yahoo's quoteSummary endpoint now requires a per-session crumb + cookie.
+// We fetch them once and cache for ~30 minutes.
+let yahooCrumbCache: { crumb: string; cookie: string; at: number } | null = null;
+const CRUMB_TTL_MS = 30 * 60_000;
+
+async function getYahooCrumb(): Promise<{ crumb: string; cookie: string } | null> {
+  const now = Date.now();
+  if (yahooCrumbCache && now - yahooCrumbCache.at < CRUMB_TTL_MS) {
+    return { crumb: yahooCrumbCache.crumb, cookie: yahooCrumbCache.cookie };
+  }
+  const ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
+  const baseHeaders = {
+    "user-agent": ua,
+    accept: "*/*",
+    "accept-language": "en-US,en;q=0.9",
+    referer: "https://finance.yahoo.com/",
+  };
+  const crumbHosts = ["query2.finance.yahoo.com", "query1.finance.yahoo.com"];
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const seed = await fetch("https://fc.yahoo.com", {
+        headers: baseHeaders,
+        redirect: "manual",
+      });
+      const setCookie = seed.headers.get("set-cookie") ?? "";
+      const cookie = setCookie
+        .split(/,(?=[^;]+=)/)
+        .map((c) => c.split(";")[0].trim())
+        .filter(Boolean)
+        .join("; ");
+      if (!cookie) {
+        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+        continue;
+      }
+      let cr: Response | null = null;
+      let lastStatus = 0;
+      for (const host of crumbHosts) {
+        cr = await fetch(`https://${host}/v1/test/getcrumb`, {
+          headers: { ...baseHeaders, cookie },
+        });
+        lastStatus = cr.status;
+        if (cr.ok) break;
+      }
+      if (!cr || !cr.ok) {
+        logger.warn({ status: lastStatus, attempt }, "yahoo crumb fetch failed");
+        await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+        continue;
+      }
+      const crumb = (await cr.text()).trim();
+      if (!crumb || crumb.length > 64) {
+        logger.warn({ crumbLen: crumb.length }, "yahoo crumb invalid");
+        return null;
+      }
+      yahooCrumbCache = { crumb, cookie, at: now };
+      return { crumb, cookie };
+    } catch (err) {
+      logger.warn({ err, attempt }, "yahoo crumb error");
+      await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+    }
+  }
+  return null;
+}
+
+type QuoteSummaryResponse = {
+  quoteSummary?: {
+    result?: Array<{
+      earningsHistory?: {
+        history?: Array<{
+          quarter?: { fmt?: string; raw?: number };
+          epsActual?: { raw?: number };
+          epsEstimate?: { raw?: number };
+          epsDifference?: { raw?: number };
+          surprisePercent?: { raw?: number };
+          period?: string;
+        }>;
+      };
+      earnings?: {
+        financialsChart?: {
+          quarterly?: Array<{
+            date?: string;
+            revenue?: { raw?: number };
+            earnings?: { raw?: number };
+          }>;
+        };
+        earningsChart?: {
+          quarterly?: Array<{
+            date?: string;
+            actual?: { raw?: number };
+            estimate?: { raw?: number };
+          }>;
+          currentQuarterEstimate?: { raw?: number };
+          currentQuarterEstimateDate?: string;
+          currentQuarterEstimateYear?: number;
+          earningsDate?: Array<{ fmt?: string; raw?: number }>;
+        };
+      };
+      calendarEvents?: {
+        earnings?: {
+          earningsDate?: Array<{ fmt?: string; raw?: number }>;
+          earningsAverage?: { raw?: number };
+          earningsLow?: { raw?: number };
+          earningsHigh?: { raw?: number };
+          revenueAverage?: { raw?: number };
+        };
+      };
+      price?: { currency?: string };
+    }>;
+  };
+};
+
+function parseEarningsResponse(symbol: string, data: QuoteSummaryResponse): EarningsInfo {
+  const empty = (source: EarningsInfo["source"]): EarningsInfo => ({
+    symbol, currency: null, history: [], q1Latest: null, next: null,
+    fetchedAt: new Date().toISOString(), source,
+  });
+  const r = data.quoteSummary?.result?.[0];
+  if (!r) return empty("unavailable");
+  const currency = r.price?.currency ?? null;
+  const revByCode = new Map<string, number>();
+  for (const q of r.earnings?.financialsChart?.quarterly ?? []) {
+    if (q.date && typeof q.revenue?.raw === "number") {
+      revByCode.set(q.date, q.revenue.raw);
+    }
+  }
+  const history: EarningsRow[] = [];
+  for (const h of r.earningsHistory?.history ?? []) {
+    const dateRaw = h.quarter?.raw;
+    const dateIso = typeof dateRaw === "number"
+      ? new Date(dateRaw * 1000).toISOString()
+      : (h.quarter?.fmt ?? "");
+    const d = dateIso ? new Date(dateIso) : null;
+    const fiscalQuarter = d && !Number.isNaN(d.getTime()) ? quarterFromDate(d) : "";
+    const fiscalYear = d && !Number.isNaN(d.getTime()) ? d.getUTCFullYear() : null;
+    const epsActual = typeof h.epsActual?.raw === "number" ? h.epsActual.raw : null;
+    const epsEstimate = typeof h.epsEstimate?.raw === "number" ? h.epsEstimate.raw : null;
+    let surprisePct = typeof h.surprisePercent?.raw === "number" ? h.surprisePercent.raw : null;
+    if (surprisePct == null && epsActual != null && epsEstimate != null && epsEstimate !== 0) {
+      surprisePct = ((epsActual - epsEstimate) / Math.abs(epsEstimate)) * 100;
+    }
+    const code = fiscalQuarter && fiscalYear ? `${fiscalQuarter[1]}Q${fiscalYear}` : "";
+    const revenueActual = code && revByCode.has(code) ? revByCode.get(code)! : null;
+    history.push({
+      date: dateIso, fiscalQuarter, fiscalYear,
+      epsActual, epsEstimate, revenueActual, revenueEstimate: null,
+      surprisePct, scheduled: false,
+    });
+  }
+  history.sort((a, b) => (new Date(b.date).getTime() || 0) - (new Date(a.date).getTime() || 0));
+  const q1Latest = history.find((h) => h.fiscalQuarter === "Q1" && h.epsActual != null) ?? null;
+
+  let next: EarningsRow | null = null;
+  const cal = r.calendarEvents?.earnings;
+  const nextRaw = cal?.earningsDate?.[0]?.raw;
+  if (typeof nextRaw === "number") {
+    const nextDate = new Date(nextRaw * 1000);
+    if (nextDate.getTime() > Date.now()) {
+      next = {
+        date: nextDate.toISOString(),
+        fiscalQuarter: quarterFromDate(nextDate),
+        fiscalYear: nextDate.getUTCFullYear(),
+        epsActual: null,
+        epsEstimate: typeof cal?.earningsAverage?.raw === "number" ? cal.earningsAverage.raw : null,
+        revenueActual: null,
+        revenueEstimate: typeof cal?.revenueAverage?.raw === "number" ? cal.revenueAverage.raw : null,
+        surprisePct: null,
+        scheduled: true,
+      };
+    }
+  }
+  return {
+    symbol, currency, history: history.slice(0, 8),
+    q1Latest, next,
+    fetchedAt: new Date().toISOString(), source: "yahoo",
+  };
+}
+
 /**
  * Fetch the latest quarterly earnings history for a stock from Yahoo Finance.
- * Yahoo's v10 quoteSummary occasionally fails (rate-limit, missing crumb, or
- * the symbol simply doesn't have earnings — e.g. crypto / indexes). We always
- * return an EarningsInfo object so the caller can render a friendly message.
+ * Yahoo's v10 quoteSummary requires a per-session crumb + cookie. We cache
+ * those for ~30 minutes and silently retry once if the crumb has expired.
  */
 export async function fetchEarnings(symbol: string): Promise<EarningsInfo> {
   const empty = (source: EarningsInfo["source"]): EarningsInfo => ({
-    symbol,
-    currency: null,
-    history: [],
-    q1Latest: null,
-    next: null,
-    fetchedAt: new Date().toISOString(),
-    source,
+    symbol, currency: null, history: [], q1Latest: null, next: null,
+    fetchedAt: new Date().toISOString(), source,
   });
 
-  const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(
+  const auth = await getYahooCrumb();
+  const ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
+  const base = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(
     symbol,
   )}?modules=earningsHistory,earnings,calendarEvents,price`;
+  const url = auth ? `${base}&crumb=${encodeURIComponent(auth.crumb)}` : base;
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 10_000);
   try {
     const res = await fetch(url, {
       signal: ctrl.signal,
-      headers: { "user-agent": "Mozilla/5.0 NeuroLinkedBrain/1.0" },
+      headers: {
+        "user-agent": ua,
+        ...(auth ? { cookie: auth.cookie } : {}),
+      },
     });
+    if (res.status === 401 || res.status === 403) {
+      yahooCrumbCache = null;
+      const fresh = await getYahooCrumb();
+      if (fresh) {
+        const retryUrl = `${base}&crumb=${encodeURIComponent(fresh.crumb)}`;
+        const r2 = await fetch(retryUrl, {
+          signal: ctrl.signal,
+          headers: { "user-agent": ua, cookie: fresh.cookie },
+        });
+        if (r2.ok) {
+          const retryData = (await r2.json()) as QuoteSummaryResponse;
+          return parseEarningsResponse(symbol, retryData);
+        }
+      }
+      logger.warn({ symbol, status: res.status }, "earnings auth failed");
+      return empty("unavailable");
+    }
     if (!res.ok) {
       logger.warn({ symbol, status: res.status }, "earnings fetch failed");
       return empty("unavailable");
     }
-    const data = (await res.json()) as {
-      quoteSummary?: {
-        result?: Array<{
-          earningsHistory?: {
-            history?: Array<{
-              quarter?: { fmt?: string; raw?: number };
-              epsActual?: { raw?: number };
-              epsEstimate?: { raw?: number };
-              epsDifference?: { raw?: number };
-              surprisePercent?: { raw?: number };
-              period?: string;
-            }>;
-          };
-          earnings?: {
-            financialsChart?: {
-              quarterly?: Array<{
-                date?: string;          // e.g. "1Q2024"
-                revenue?: { raw?: number };
-                earnings?: { raw?: number };
-              }>;
-            };
-            earningsChart?: {
-              quarterly?: Array<{
-                date?: string;          // e.g. "1Q2024"
-                actual?: { raw?: number };
-                estimate?: { raw?: number };
-              }>;
-              currentQuarterEstimate?: { raw?: number };
-              currentQuarterEstimateDate?: string;
-              currentQuarterEstimateYear?: number;
-              earningsDate?: Array<{ fmt?: string; raw?: number }>;
-            };
-          };
-          calendarEvents?: {
-            earnings?: {
-              earningsDate?: Array<{ fmt?: string; raw?: number }>;
-              earningsAverage?: { raw?: number };
-              earningsLow?: { raw?: number };
-              earningsHigh?: { raw?: number };
-              revenueAverage?: { raw?: number };
-            };
-          };
-          price?: { currency?: string };
-        }>;
-      };
-    };
-    const r = data.quoteSummary?.result?.[0];
-    if (!r) return empty("unavailable");
-
-    const currency = r.price?.currency ?? null;
-
-    // Index the earnings.financialsChart.quarterly by "1Q2024" so we can join
-    // revenue numbers onto rows from earningsHistory.
-    const revByCode = new Map<string, number>();
-    for (const q of r.earnings?.financialsChart?.quarterly ?? []) {
-      if (q.date && typeof q.revenue?.raw === "number") {
-        revByCode.set(q.date, q.revenue.raw);
-      }
-    }
-    // Estimate codes (rev estimate not provided by Yahoo per-quarter on this
-    // endpoint, so we leave revenueEstimate null for past rows).
-
-    const history: EarningsRow[] = [];
-    for (const h of r.earningsHistory?.history ?? []) {
-      const dateRaw = h.quarter?.raw;
-      const dateIso = typeof dateRaw === "number"
-        ? new Date(dateRaw * 1000).toISOString()
-        : (h.quarter?.fmt ?? "");
-      const d = dateIso ? new Date(dateIso) : null;
-      const fiscalQuarter = d && !Number.isNaN(d.getTime()) ? quarterFromDate(d) : "";
-      const fiscalYear = d && !Number.isNaN(d.getTime()) ? d.getUTCFullYear() : null;
-      const epsActual = typeof h.epsActual?.raw === "number" ? h.epsActual.raw : null;
-      const epsEstimate = typeof h.epsEstimate?.raw === "number" ? h.epsEstimate.raw : null;
-      let surprisePct = typeof h.surprisePercent?.raw === "number" ? h.surprisePercent.raw : null;
-      if (surprisePct == null && epsActual != null && epsEstimate != null && epsEstimate !== 0) {
-        surprisePct = ((epsActual - epsEstimate) / Math.abs(epsEstimate)) * 100;
-      }
-      // Try matching this row to revByCode: code is like "1Q2024".
-      const code = fiscalQuarter && fiscalYear
-        ? `${fiscalQuarter[1]}Q${fiscalYear}`
-        : "";
-      const revenueActual = code && revByCode.has(code) ? revByCode.get(code)! : null;
-      history.push({
-        date: dateIso,
-        fiscalQuarter,
-        fiscalYear,
-        epsActual,
-        epsEstimate,
-        revenueActual,
-        revenueEstimate: null,
-        surprisePct,
-        scheduled: false,
-      });
-    }
-    // Sort newest first.
-    history.sort((a, b) => (new Date(b.date).getTime() || 0) - (new Date(a.date).getTime() || 0));
-
-    const q1Latest = history.find((h) => h.fiscalQuarter === "Q1" && h.epsActual != null) ?? null;
-
-    // Next earnings (scheduled, not yet reported)
-    let next: EarningsRow | null = null;
-    const cal = r.calendarEvents?.earnings;
-    const nextRaw = cal?.earningsDate?.[0]?.raw;
-    if (typeof nextRaw === "number") {
-      const nextDate = new Date(nextRaw * 1000);
-      if (nextDate.getTime() > Date.now()) {
-        next = {
-          date: nextDate.toISOString(),
-          fiscalQuarter: quarterFromDate(nextDate),
-          fiscalYear: nextDate.getUTCFullYear(),
-          epsActual: null,
-          epsEstimate: typeof cal?.earningsAverage?.raw === "number" ? cal.earningsAverage.raw : null,
-          revenueActual: null,
-          revenueEstimate: typeof cal?.revenueAverage?.raw === "number" ? cal.revenueAverage.raw : null,
-          surprisePct: null,
-          scheduled: true,
-        };
-      }
-    }
-
-    return {
-      symbol,
-      currency,
-      history: history.slice(0, 8),  // last 2 years of quarters at most
-      q1Latest,
-      next,
-      fetchedAt: new Date().toISOString(),
-      source: "yahoo",
-    };
+    const data = (await res.json()) as QuoteSummaryResponse;
+    return parseEarningsResponse(symbol, data);
   } catch (err) {
     logger.warn({ err, symbol }, "earnings fetch error");
     return empty("unavailable");
@@ -683,18 +749,31 @@ ${earningsBlock(earnings)}
 RECENT HEADLINES
 ${headlineBlock}
 
-TASK
-1. Weigh the headlines, the live quote, the TECHNICALS (trend vs SMA20/50, RSI extremes, 52w position, realized volatility), the INTRADAY momentum, AND the earnings record (especially the most recent Q1 print and any upcoming earnings date) to decide a directional bias for the given horizon.
-2. Translate that into an options trade signal:
-   - BUY_CALL when bias is bullish with enough conviction
-   - BUY_PUT when bias is bearish with enough conviction
-   - HOLD when conviction is too low or the picture is mixed
-3. Recommend strike (ATM / slightly-OTM / slightly-ITM) and expiry that fits the horizon.
-4. Give a clear "entry trigger" — a short, observable condition that should be true before opening the trade (e.g. "Wait for close above $275" or "Enter if pre-market sells off below $268").
-5. Add a one-line risk note for what would invalidate the thesis.
-6. Spell out the BULL CASE and the BEAR CASE in 1-2 sentences each so the user can stress-test your call.
-7. List 2-4 KEY DRIVERS — the concrete factors moving this name right now (e.g. "Q1 EPS beat by 7%", "AI-capex commentary", "rate-cut pricing").
-8. List 1-3 NEXT CATALYSTS — upcoming events that would change the picture (e.g. "FOMC Mar 19", "Q2 earnings late Apr", "Vision Pro launch").
+TASK — work through this internally, then emit only the JSON:
+A. SCORE each input on a -2..+2 scale and tally:
+   • Trend (price vs SMA20/SMA50)
+   • Momentum (RSI14 + 5d/1m % change + intraday session move)
+   • Mean-reversion risk (RSI extremes, position vs 52w high/low)
+   • Earnings (most recent Q1 surprise + proximity of next earnings date)
+   • News tone (count of clearly bullish vs bearish headlines)
+B. Pick direction from the SUM (positive → BULLISH, negative → BEARISH, |sum|≤1 → NEUTRAL).
+C. Confidence = clamp(0.4 + 0.1*|sum| + 0.05*(news_signal_strength), 0, 0.95).
+   Lower confidence whenever signals contradict each other.
+D. Compute targetPrice with this formula, NOT a guess:
+     expected_pct ≈ direction_sign * confidence * min(20, k * volatility20d * sqrt(horizon_days/20))
+   where k = 1.0 for stocks/ETFs, 1.5 for crypto/forex/index, horizon_days as listed below,
+   then round to a clean number near the live quote. Cap |expected_pct| ≤ 20%.
+   Horizon → days: "1d"=1, "1w"=5, "2w"=10, "1m"=21, "3m"=63.
+E. Translate to options signal:
+   - BUY_CALL when BULLISH and confidence ≥ 0.55
+   - BUY_PUT when BEARISH and confidence ≥ 0.55
+   - HOLD otherwise
+F. Recommend strike (ATM / slightly-OTM / slightly-ITM) and expiry that fits the horizon.
+G. Give a clear "entry trigger" — observable condition (e.g. "Close above $275" or "If pre-market dips below $268").
+H. One-line risk note for what would invalidate the thesis.
+I. Spell out the BULL CASE and BEAR CASE in 1-2 sentences each.
+J. List 2-4 KEY DRIVERS citing concrete numbers from the data above.
+K. List 1-3 NEXT CATALYSTS — upcoming events with approx dates if known.
 
 Respond with STRICT JSON only, matching this shape:
 {
@@ -719,8 +798,11 @@ Rules:
 - If confidence < 0.55, action MUST be "HOLD".
 - BUY_CALL only with BULLISH direction, BUY_PUT only with BEARISH.
 - Do not invent the strike price — base strike hints on the live quote shown.
-- targetPrice MUST be a realistic dollar number near the live quote (typical move 0.5%-8%, never more than 20%).
+- targetPrice MUST follow the volatility formula in step D. Round to a reasonable tick (e.g. $0.50 for stocks > $50, $0.10 for crypto < $5). NEVER more than 20% from live price.
+- If volatility20d is unavailable, assume 1.5% daily vol for stocks/ETFs, 4% for crypto.
 - If earnings were unavailable, you may say so in reasoning but still produce the forecast.
+- Cite headlines by [n] when you reference them; cite specific numbers (RSI value, % change, SMA price) when you cite technicals.
+- Reasoning must mention at least 2 of: trend signal, momentum signal, RSI/52w position, earnings context, news tone.
 - No prose outside the JSON.`;
 
   let direction: "BULLISH" | "BEARISH" | "NEUTRAL" = "NEUTRAL";

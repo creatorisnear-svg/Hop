@@ -212,6 +212,186 @@ router.post("/market/watches/:id/predict", async (req, res) => {
   }
 });
 
+// Stock / asset search — wraps Yahoo's free search endpoint so the user can
+// type a name like "apple" or "tesla" instead of having to know the ticker.
+// When Yahoo is rate-limiting / blocking us we fall back to SEC EDGAR's
+// company-tickers file (US stocks/ETFs only) plus a small built-in list of
+// popular crypto / forex pairs so the search box stays useful.
+const searchCache = new Map<string, { ts: number; data: unknown }>();
+const SEARCH_TTL_MS = 5 * 60_000;
+
+type SearchResult = {
+  symbol: string;
+  name: string;
+  market: string;
+  exchange: string | null;
+  sector: string | null;
+  industry: string | null;
+};
+
+let secTickers: Array<{ ticker: string; title: string }> | null = null;
+let secTickersAt = 0;
+const SEC_TICKERS_TTL_MS = 24 * 60 * 60_000;
+async function loadSecTickers(): Promise<Array<{ ticker: string; title: string }>> {
+  if (secTickers && Date.now() - secTickersAt < SEC_TICKERS_TTL_MS) return secTickers;
+  try {
+    const r = await fetch("https://www.sec.gov/files/company_tickers.json", {
+      headers: { "user-agent": "NeuroLinkedBrain support@neurolinked.local" },
+    });
+    if (!r.ok) return secTickers ?? [];
+    const data = (await r.json()) as Record<string, { ticker: string; title: string }>;
+    secTickers = Object.values(data).map((v) => ({
+      ticker: String(v.ticker).toUpperCase(),
+      title: String(v.title),
+    }));
+    secTickersAt = Date.now();
+    return secTickers;
+  } catch {
+    return secTickers ?? [];
+  }
+}
+
+const POPULAR_CRYPTO_FOREX: SearchResult[] = [
+  { symbol: "BTC-USD", name: "Bitcoin USD", market: "crypto", exchange: "CCC", sector: null, industry: null },
+  { symbol: "ETH-USD", name: "Ethereum USD", market: "crypto", exchange: "CCC", sector: null, industry: null },
+  { symbol: "SOL-USD", name: "Solana USD", market: "crypto", exchange: "CCC", sector: null, industry: null },
+  { symbol: "DOGE-USD", name: "Dogecoin USD", market: "crypto", exchange: "CCC", sector: null, industry: null },
+  { symbol: "XRP-USD", name: "XRP USD", market: "crypto", exchange: "CCC", sector: null, industry: null },
+  { symbol: "ADA-USD", name: "Cardano USD", market: "crypto", exchange: "CCC", sector: null, industry: null },
+  { symbol: "BNB-USD", name: "BNB USD", market: "crypto", exchange: "CCC", sector: null, industry: null },
+  { symbol: "AVAX-USD", name: "Avalanche USD", market: "crypto", exchange: "CCC", sector: null, industry: null },
+  { symbol: "MATIC-USD", name: "Polygon USD", market: "crypto", exchange: "CCC", sector: null, industry: null },
+  { symbol: "LINK-USD", name: "Chainlink USD", market: "crypto", exchange: "CCC", sector: null, industry: null },
+  { symbol: "EURUSD=X", name: "EUR/USD", market: "forex", exchange: "FX", sector: null, industry: null },
+  { symbol: "GBPUSD=X", name: "GBP/USD", market: "forex", exchange: "FX", sector: null, industry: null },
+  { symbol: "USDJPY=X", name: "USD/JPY", market: "forex", exchange: "FX", sector: null, industry: null },
+  { symbol: "USDCAD=X", name: "USD/CAD", market: "forex", exchange: "FX", sector: null, industry: null },
+  { symbol: "AUDUSD=X", name: "AUD/USD", market: "forex", exchange: "FX", sector: null, industry: null },
+  { symbol: "^GSPC", name: "S&P 500", market: "index", exchange: "SNP", sector: null, industry: null },
+  { symbol: "^IXIC", name: "NASDAQ Composite", market: "index", exchange: "NIM", sector: null, industry: null },
+  { symbol: "^DJI", name: "Dow Jones Industrial Average", market: "index", exchange: "DJI", sector: null, industry: null },
+  { symbol: "^RUT", name: "Russell 2000", market: "index", exchange: "RUT", sector: null, industry: null },
+  { symbol: "GC=F", name: "Gold Futures", market: "commodity", exchange: "CMX", sector: null, industry: null },
+  { symbol: "CL=F", name: "Crude Oil Futures", market: "commodity", exchange: "NYM", sector: null, industry: null },
+];
+
+async function searchFallback(q: string): Promise<SearchResult[]> {
+  const needle = q.toLowerCase();
+  const out: SearchResult[] = [];
+  for (const e of POPULAR_CRYPTO_FOREX) {
+    if (e.symbol.toLowerCase().includes(needle) || e.name.toLowerCase().includes(needle)) {
+      out.push(e);
+    }
+  }
+  const tickers = await loadSecTickers();
+  const exact = tickers.filter((t) => t.ticker.toLowerCase() === needle);
+  const startsTicker = tickers.filter((t) => t.ticker.toLowerCase().startsWith(needle) && !exact.includes(t));
+  const startsTitle = tickers.filter(
+    (t) => t.title.toLowerCase().startsWith(needle) && !exact.includes(t) && !startsTicker.includes(t),
+  );
+  const containsTitle = tickers.filter(
+    (t) =>
+      t.title.toLowerCase().includes(needle) &&
+      !exact.includes(t) &&
+      !startsTicker.includes(t) &&
+      !startsTitle.includes(t),
+  );
+  for (const t of [...exact, ...startsTicker, ...startsTitle, ...containsTitle].slice(0, 10)) {
+    out.push({
+      symbol: t.ticker,
+      name: t.title.replace(/\s+/g, " ").trim(),
+      market: "stock",
+      exchange: null,
+      sector: null,
+      industry: null,
+    });
+  }
+  return out.slice(0, 10);
+}
+router.get("/market/search", async (req, res) => {
+  const q = String(req.query.q ?? "").trim();
+  if (!q) return res.json({ results: [] });
+  const key = q.toLowerCase();
+  const hit = searchCache.get(key);
+  if (hit && Date.now() - hit.ts < SEARCH_TTL_MS) return res.json(hit.data);
+  const ua =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
+  const hosts = ["query2.finance.yahoo.com", "query1.finance.yahoo.com"];
+  let r: Response | null = null;
+  let lastStatus = 0;
+  outer: for (let attempt = 0; attempt < 3; attempt++) {
+    for (const host of hosts) {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 6000);
+        r = await fetch(
+          `https://${host}/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=10&newsCount=0`,
+          {
+            signal: ctrl.signal,
+            headers: {
+              "user-agent": ua,
+              accept: "application/json,text/plain,*/*",
+              "accept-language": "en-US,en;q=0.9",
+              referer: "https://finance.yahoo.com/",
+            },
+          },
+        );
+        clearTimeout(t);
+        lastStatus = r.status;
+        if (r.ok) break outer;
+      } catch {
+        /* try next */
+      }
+    }
+    await new Promise((rs) => setTimeout(rs, 400 * (attempt + 1)));
+  }
+  try {
+    if (!r || !r.ok) {
+      logger.warn({ q, status: lastStatus }, "yahoo search failed, using SEC fallback");
+      const results = await searchFallback(q);
+      const payload = { results, source: "fallback" };
+      if (results.length) searchCache.set(key, { ts: Date.now(), data: payload });
+      return res.json(payload);
+    }
+    const data = (await r.json()) as {
+      quotes?: Array<{
+        symbol?: string;
+        shortname?: string;
+        longname?: string;
+        quoteType?: string;
+        exchDisp?: string;
+        sector?: string;
+        industry?: string;
+      }>;
+    };
+    const typeMap: Record<string, string> = {
+      EQUITY: "stock",
+      ETF: "etf",
+      CRYPTOCURRENCY: "crypto",
+      INDEX: "index",
+      CURRENCY: "forex",
+      MUTUALFUND: "etf",
+    };
+    const results = (data.quotes ?? [])
+      .filter((q) => q.symbol)
+      .map((qt) => ({
+        symbol: qt.symbol!,
+        name: qt.longname || qt.shortname || qt.symbol!,
+        market: typeMap[qt.quoteType ?? ""] ?? "stock",
+        exchange: qt.exchDisp ?? null,
+        sector: qt.sector ?? null,
+        industry: qt.industry ?? null,
+      }))
+      .slice(0, 10);
+    const payload = { results };
+    searchCache.set(key, { ts: Date.now(), data: payload });
+    res.json(payload);
+  } catch (err) {
+    logger.warn({ err, q }, "search error");
+    res.json({ results: [] });
+  }
+});
+
 router.get("/market/quote/:symbol", async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
   const now = Date.now();
