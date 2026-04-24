@@ -75,7 +75,7 @@ You DO have tools available, but use them sparingly and only when the user's req
 AUTONOMOUS ACTIONS (GitHub + Koyeb) — split into two tiers:
 
 TIER 1 — Read-only, fast-path (callable directly from chat):
-- \`github_list_commits\`, \`github_read_file\`, \`koyeb_list_services\`, \`koyeb_get_logs\`
+- \`github_list_repos\`, \`github_list_commits\`, \`github_read_file\`, \`koyeb_list_services\`, \`koyeb_get_logs\`
 - Use these when the user just wants information ("what's deployed?", "show me the latest logs", "what's in App.tsx?"). They are audited and kill-switch-gated but skip the full brain run for speed.
 
 TIER 2 — Write/mutating (MUST go through the brain via \`start_run\`):

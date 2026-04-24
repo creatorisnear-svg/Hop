@@ -55,13 +55,20 @@ export async function recordAction(args: {
 //   Account 2: GITHUB_TOKEN_2 / GITHUB_REPO_2 / GITHUB_BRANCH_2
 // ---------------------------------------------------------------------------
 
-function ghEnv(account: Account = 1): { token: string; owner: string; repo: string; branch: string } {
+function ghEnv(
+  account: Account = 1,
+  repoOverride?: string,
+): { token: string; owner: string; repo: string; branch: string } {
   const suffix = account === 2 ? "_2" : "";
   const token = process.env[`GITHUB_TOKEN${suffix}`];
-  const repoFull = process.env[`GITHUB_REPO${suffix}`];
   if (!token) throw new Error(`GITHUB_TOKEN${suffix} not set (account ${account})`);
+  const repoFull = repoOverride ?? process.env[`GITHUB_REPO${suffix}`];
   if (!repoFull || !repoFull.includes("/"))
-    throw new Error(`GITHUB_REPO${suffix} must be 'owner/name' (account ${account})`);
+    throw new Error(
+      repoOverride
+        ? `repo must be 'owner/name', got: ${repoOverride}`
+        : `GITHUB_REPO${suffix} must be 'owner/name' (account ${account}), or pass repo='owner/name' as a tool parameter`,
+    );
   const [owner, repo] = repoFull.split("/", 2);
   const branch = process.env[`GITHUB_BRANCH${suffix}`] ?? "main";
   return { token, owner, repo, branch };
@@ -97,13 +104,28 @@ export const github = {
     return out;
   },
 
-  async listCommits(limit = 10, account?: number) {
+  async listRepos(account?: number, perPage = 30) {
     const acc = normalizeAccount(account);
-    const { owner, repo, branch } = ghEnv(acc);
+    const rows = await gh<Array<{ full_name: string; private: boolean; default_branch: string; updated_at: string }>>(
+      acc,
+      "GET",
+      `/user/repos?per_page=${Math.min(Math.max(perPage, 1), 100)}&sort=updated&affiliation=owner,collaborator,organization_member`,
+    );
+    return rows.map((r) => ({
+      fullName: r.full_name,
+      private: r.private,
+      defaultBranch: r.default_branch,
+      updatedAt: r.updated_at,
+    }));
+  },
+
+  async listCommits(limit = 10, account?: number, repo?: string) {
+    const acc = normalizeAccount(account);
+    const env = ghEnv(acc, repo);
     const rows = await gh<Array<{ sha: string; commit: { message: string; author: { name: string; date: string } } }>>(
       acc,
       "GET",
-      `/repos/${owner}/${repo}/commits?sha=${encodeURIComponent(branch)}&per_page=${Math.min(Math.max(limit, 1), 50)}`,
+      `/repos/${env.owner}/${env.repo}/commits?sha=${encodeURIComponent(env.branch)}&per_page=${Math.min(Math.max(limit, 1), 50)}`,
     );
     return rows.map((c) => ({
       sha: c.sha.slice(0, 7),
@@ -113,23 +135,23 @@ export const github = {
     }));
   },
 
-  async readFile(filePath: string, ref?: string, account?: number) {
+  async readFile(filePath: string, ref?: string, account?: number, repo?: string) {
     const acc = normalizeAccount(account);
-    const { owner, repo, branch } = ghEnv(acc);
-    const r = ref ?? branch;
+    const env = ghEnv(acc, repo);
+    const r = ref ?? env.branch;
     const data = await gh<{ content?: string; encoding?: string; sha?: string }>(
       acc,
       "GET",
-      `/repos/${owner}/${repo}/contents/${encodeURIComponent(filePath)}?ref=${encodeURIComponent(r)}`,
+      `/repos/${env.owner}/${env.repo}/contents/${encodeURIComponent(filePath)}?ref=${encodeURIComponent(r)}`,
     );
     if (!data.content) throw new Error("Not a file");
     const text = Buffer.from(data.content, (data.encoding ?? "base64") as BufferEncoding).toString("utf8");
     return { sha: data.sha, content: text };
   },
 
-  async writeFile(filePath: string, content: string, message: string, branch?: string, account?: number) {
+  async writeFile(filePath: string, content: string, message: string, branch?: string, account?: number, repo?: string) {
     const acc = normalizeAccount(account);
-    const env = ghEnv(acc);
+    const env = ghEnv(acc, repo);
     const targetBranch = branch ?? env.branch;
     let existingSha: string | undefined;
     try {
@@ -156,9 +178,9 @@ export const github = {
     return { commitSha: result.commit.sha, url: result.commit.html_url };
   },
 
-  async createBranch(newBranch: string, fromBranch?: string, account?: number) {
+  async createBranch(newBranch: string, fromBranch?: string, account?: number, repo?: string) {
     const acc = normalizeAccount(account);
-    const env = ghEnv(acc);
+    const env = ghEnv(acc, repo);
     const base = fromBranch ?? env.branch;
     const ref = await gh<{ object: { sha: string } }>(
       acc,
@@ -172,9 +194,9 @@ export const github = {
     return { branch: newBranch, fromSha: ref.object.sha };
   },
 
-  async openPR(title: string, body: string, head: string, base?: string, account?: number) {
+  async openPR(title: string, body: string, head: string, base?: string, account?: number, repo?: string) {
     const acc = normalizeAccount(account);
-    const env = ghEnv(acc);
+    const env = ghEnv(acc, repo);
     const pr = await gh<{ number: number; html_url: string }>(
       acc,
       "POST",
@@ -184,9 +206,9 @@ export const github = {
     return { number: pr.number, url: pr.html_url };
   },
 
-  async mergePR(number: number, method: "merge" | "squash" | "rebase" = "squash", account?: number) {
+  async mergePR(number: number, method: "merge" | "squash" | "rebase" = "squash", account?: number, repo?: string) {
     const acc = normalizeAccount(account);
-    const env = ghEnv(acc);
+    const env = ghEnv(acc, repo);
     const r = await gh<{ sha: string; merged: boolean }>(
       acc,
       "PUT",

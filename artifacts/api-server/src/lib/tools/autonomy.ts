@@ -17,6 +17,13 @@ const ACCOUNT_PROP = {
   },
 } as const;
 
+const REPO_PROP = {
+  repo: {
+    type: "string",
+    description: "Optional 'owner/name' of any repo the token can access. Defaults to GITHUB_REPO. Use this to target other repos under the same account without setting another env var.",
+  },
+} as const;
+
 /**
  * Wrap a tool's run() so every invocation:
  *   1. Checks the JARVIS_AUTONOMY kill switch
@@ -60,18 +67,37 @@ export function registerAutonomyTools(): void {
   // GitHub --------------------------------------------------------------
   registerTool(
     autonomous({
+      name: "github_list_repos",
+      description: "List repositories the configured GitHub token can access (own + collaborator + org). Use this when the user asks about their other repos or wants to know what Jarvis can touch.",
+      paramsSchema: {
+        type: "object",
+        properties: {
+          perPage: { type: "integer", default: 30, minimum: 1, maximum: 100 },
+          ...ACCOUNT_PROP,
+        },
+      },
+      async run(params: unknown) {
+        const { perPage = 30, account } = (params as { perPage?: number; account?: number }) ?? {};
+        return github.listRepos(account, perPage);
+      },
+    }),
+  );
+
+  registerTool(
+    autonomous({
       name: "github_list_commits",
-      description: "List the most recent commits on a configured repo branch.",
+      description: "List the most recent commits on a repo branch.",
       paramsSchema: {
         type: "object",
         properties: {
           limit: { type: "integer", default: 10, minimum: 1, maximum: 50 },
           ...ACCOUNT_PROP,
+          ...REPO_PROP,
         },
       },
       async run(params: unknown) {
-        const { limit = 10, account } = (params as { limit?: number; account?: number }) ?? {};
-        return github.listCommits(limit, account);
+        const { limit = 10, account, repo } = (params as { limit?: number; account?: number; repo?: string }) ?? {};
+        return github.listCommits(limit, account, repo);
       },
     }),
   );
@@ -79,7 +105,7 @@ export function registerAutonomyTools(): void {
   registerTool(
     autonomous({
       name: "github_read_file",
-      description: "Read a file's contents from a configured repo.",
+      description: "Read a file's contents from a repo.",
       paramsSchema: {
         type: "object",
         required: ["path"],
@@ -87,11 +113,12 @@ export function registerAutonomyTools(): void {
           path: { type: "string", description: "Repo-relative file path" },
           ref: { type: "string", description: "Branch, tag, or commit SHA (optional)" },
           ...ACCOUNT_PROP,
+          ...REPO_PROP,
         },
       },
       async run(params: unknown) {
-        const { path, ref, account } = params as { path: string; ref?: string; account?: number };
-        return github.readFile(path, ref, account);
+        const { path, ref, account, repo } = params as { path: string; ref?: string; account?: number; repo?: string };
+        return github.readFile(path, ref, account, repo);
       },
     }),
   );
@@ -100,7 +127,7 @@ export function registerAutonomyTools(): void {
     autonomous({
       name: "github_write_file",
       description:
-        "Create or update a file in a configured repo. Commits directly to the given branch (defaults to main).",
+        "Create or update a file in a repo. Commits directly to the given branch (defaults to main).",
       paramsSchema: {
         type: "object",
         required: ["path", "content", "message"],
@@ -110,13 +137,14 @@ export function registerAutonomyTools(): void {
           message: { type: "string", description: "Commit message" },
           branch: { type: "string", description: "Target branch (default: main)" },
           ...ACCOUNT_PROP,
+          ...REPO_PROP,
         },
       },
       async run(params: unknown) {
-        const { path, content, message, branch, account } = params as {
-          path: string; content: string; message: string; branch?: string; account?: number;
+        const { path, content, message, branch, account, repo } = params as {
+          path: string; content: string; message: string; branch?: string; account?: number; repo?: string;
         };
-        return github.writeFile(path, content, message, branch, account);
+        return github.writeFile(path, content, message, branch, account, repo);
       },
     }),
   );
@@ -132,11 +160,12 @@ export function registerAutonomyTools(): void {
           name: { type: "string", description: "New branch name" },
           from: { type: "string", description: "Source branch (default: main)" },
           ...ACCOUNT_PROP,
+          ...REPO_PROP,
         },
       },
       async run(params: unknown) {
-        const { name, from, account } = params as { name: string; from?: string; account?: number };
-        return github.createBranch(name, from, account);
+        const { name, from, account, repo } = params as { name: string; from?: string; account?: number; repo?: string };
+        return github.createBranch(name, from, account, repo);
       },
     }),
   );
@@ -154,13 +183,14 @@ export function registerAutonomyTools(): void {
           head: { type: "string", description: "Source branch" },
           base: { type: "string", description: "Target branch (default: main)" },
           ...ACCOUNT_PROP,
+          ...REPO_PROP,
         },
       },
       async run(params: unknown) {
-        const { title, body = "", head, base, account } = params as {
-          title: string; body?: string; head: string; base?: string; account?: number;
+        const { title, body = "", head, base, account, repo } = params as {
+          title: string; body?: string; head: string; base?: string; account?: number; repo?: string;
         };
-        return github.openPR(title, body, head, base, account);
+        return github.openPR(title, body, head, base, account, repo);
       },
     }),
   );
@@ -176,13 +206,14 @@ export function registerAutonomyTools(): void {
           number: { type: "integer" },
           method: { type: "string", enum: ["merge", "squash", "rebase"], default: "squash" },
           ...ACCOUNT_PROP,
+          ...REPO_PROP,
         },
       },
       async run(params: unknown) {
-        const { number, method = "squash", account } = params as {
-          number: number; method?: "merge" | "squash" | "rebase"; account?: number;
+        const { number, method = "squash", account, repo } = params as {
+          number: number; method?: "merge" | "squash" | "rebase"; account?: number; repo?: string;
         };
-        return github.mergePR(number, method, account);
+        return github.mergePR(number, method, account, repo);
       },
     }),
   );

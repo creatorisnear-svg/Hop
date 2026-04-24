@@ -606,10 +606,26 @@ void _AUTONOMY_TOOLS_DOCS_ONLY;
 // full 6-region brain run. Every write/mutating action still goes through
 // start_run → brain pipeline (see system prompt). Audit + kill-switch still
 // apply because we delegate via invokeTool.
+const READ_ONLY_AUTONOMY_NAMES = [
+  "github_list_repos",
+  "github_list_commits",
+  "github_read_file",
+  "koyeb_list_services",
+  "koyeb_get_logs",
+];
+// Add a stub entry for github_list_repos so the filter below has docs to work with.
+if (!_AUTONOMY_TOOLS_DOCS_ONLY.find((t) => t.name === "github_list_repos")) {
+  _AUTONOMY_TOOLS_DOCS_ONLY.unshift({
+    name: "github_list_repos",
+    description: "List repos the configured GitHub token can access (own + collaborator + org).",
+    parameters: {
+      type: "object",
+      properties: { perPage: { type: "integer", description: "1-100, default 30" } },
+    },
+  });
+}
 const READ_ONLY_AUTONOMY = _AUTONOMY_TOOLS_DOCS_ONLY.filter((t) =>
-  ["github_list_commits", "github_read_file", "koyeb_list_services", "koyeb_get_logs"].includes(
-    t.name,
-  ),
+  READ_ONLY_AUTONOMY_NAMES.includes(t.name),
 );
 for (const t of READ_ONLY_AUTONOMY) {
   reg({
