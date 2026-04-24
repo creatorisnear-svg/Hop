@@ -1,6 +1,6 @@
 import React from "react";
 import { Link, useLocation } from "wouter";
-import { Activity, Brain, Network, Play, LayoutDashboard, Settings, Zap, Wrench, Moon, Sparkles, Webhook, Puzzle, Image as ImageIcon, Key } from "lucide-react";
+import { Activity, Brain, Network, Play, LayoutDashboard, Settings, Zap, Wrench, Moon, Sparkles, Webhook, Puzzle, Image as ImageIcon, Key, ShieldAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface LayoutProps {
@@ -23,6 +23,7 @@ export function Layout({ children }: LayoutProps) {
     { href: "/images", label: "Imagery", icon: ImageIcon },
     { href: "/memory", label: "Jarvis Memory", icon: Brain },
     { href: "/keys", label: "API Keys", icon: Key },
+    { href: "/jarvis-actions", label: "Jarvis Actions", icon: ShieldAlert },
     { href: "/regions", label: "Regions Config", icon: Settings },
   ];
 

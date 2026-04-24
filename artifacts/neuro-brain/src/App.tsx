@@ -19,6 +19,7 @@ import PluginsPage from "@/pages/plugins";
 import ImagesPage from "@/pages/images";
 import MemoryPage from "@/pages/memory";
 import KeysPage from "@/pages/keys";
+import JarvisActionsPage from "@/pages/jarvis-actions";
 import { JarvisChat } from "@/components/jarvis-chat";
 
 const queryClient = new QueryClient({
@@ -46,6 +47,7 @@ function Router() {
       <Route path="/images" component={ImagesPage} />
       <Route path="/memory" component={MemoryPage} />
       <Route path="/keys" component={KeysPage} />
+      <Route path="/jarvis-actions" component={JarvisActionsPage} />
       <Route component={NotFound} />
     </Switch>
   );

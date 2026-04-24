@@ -35,6 +35,8 @@ This deploys the whole thing — Express API + React UI bundled into one contain
    - `NODE_ENV` → `production`
    - `PORT` → `8080`
    - (optional) `GROQ_API_KEY_1` … `GROQ_API_KEY_10` → your Groq keys (each as Secret)
+   - (optional) `GEMINI_API_KEY_2` … `GEMINI_API_KEY_10` → extra Google AI keys for round-robin rotation. Each gets its own free quota.
+   - (optional, **autonomous Jarvis**) — see "Autonomous Jarvis" section below.
 9. **Service name:** `neuro-brain-web`
 10. Click **Deploy**.
 
@@ -70,6 +72,37 @@ Push to GitHub. In Koyeb, click **Redeploy** on the service (or set **Auto-deplo
 - **`DATABASE_URL` for Neon needs `?sslmode=require`.**
 - **Gemini errors at boot:** check the `GEMINI_API_KEY` secret is set and not pasted with extra whitespace.
 - **No Groq keys?** The brain regions will fail. Add at least one `GROQ_API_KEY_1` (free at console.groq.com).
+
+---
+
+## Autonomous Jarvis (optional, off by default)
+
+Lets Jarvis push commits to your GitHub repo and manage your Koyeb services on his own. **Disabled unless you set `JARVIS_AUTONOMY=on`.**
+
+### Secrets to add in Koyeb
+
+| Var | Notes |
+|---|---|
+| `JARVIS_AUTONOMY` | `on` to enable, `off` (or unset) to disable. The kill switch — flip to `off` from Koyeb anytime to immediately stop autonomous actions. |
+| `GITHUB_TOKEN` | Fine-grained Personal Access Token (PAT) scoped to **just this one repo**, with `Contents: Read & write` and `Pull requests: Read & write`. Do NOT grant `Administration` or org-wide scope. Create at https://github.com/settings/personal-access-tokens. |
+| `GITHUB_REPO` | `owner/name` of your repo (e.g. `yourname/neurolinked-brain`). |
+| `GITHUB_BRANCH` | Default branch (default: `main`). |
+| `KOYEB_API_TOKEN` | Koyeb API token. Create at https://app.koyeb.com/account/api. **Recommended:** make a separate Koyeb organization with just your one service in it so the token can't reach anything else. |
+
+### What Jarvis can do when autonomy is on
+
+- **GitHub:** list commits, read any file, write/create files (commits straight to a branch), create branches, open PRs, merge PRs.
+- **Koyeb:** list services, read recent logs, redeploy, pause, resume, delete services.
+
+### Visibility
+
+The web app has a new **Jarvis Actions** page that shows a live audit log of every action Jarvis takes (params, result, errors, duration). Auto-refreshes every 5 seconds.
+
+### Recovery
+
+- Want him to stop right now? Set `JARVIS_AUTONOMY=off` in Koyeb and redeploy (~30s).
+- He pushed a bad commit? GitHub keeps a reflog for ~90 days — you can revert any commit from the GitHub UI.
+- He deleted a Koyeb service? You'll have to recreate it from the deploy steps above; service deletion is permanent on Koyeb's side.
 
 ---
 

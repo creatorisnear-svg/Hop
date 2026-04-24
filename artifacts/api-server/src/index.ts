@@ -3,6 +3,7 @@ import { logger } from "./lib/logger";
 import { ensureRegionsSeeded } from "./lib/brain";
 import { REGION_DEFAULTS } from "./lib/regionDefaults";
 import { registerBuiltinTools } from "./lib/tools/builtins";
+import { registerAutonomyTools } from "./lib/tools/autonomy";
 import { startSleepScheduler } from "./lib/sleep";
 import { loadPlugins } from "./lib/plugins";
 import { runStartupKeyCheck } from "./lib/keysHealth";
@@ -32,6 +33,7 @@ async function main() {
 
   registerBuiltinTools();
   logger.info("Built-in agent tools registered");
+  registerAutonomyTools();
 
   try {
     const plugins = await loadPlugins();
