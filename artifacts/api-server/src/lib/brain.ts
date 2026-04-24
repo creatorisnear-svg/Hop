@@ -181,7 +181,10 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
 
     // ----- Execute the planned sequence -----
     const synthInputs: { region: RegionKey; instruction: string; output: string }[] = [];
-    let priorContext = "";
+    // Running scratchpad of what earlier regions produced this run. Named
+    // distinctly from the outer `priorContext` parameter (which carries chat
+    // history from prior runs) to avoid TDZ shadowing under bundlers.
+    let runScratch = "";
     let stepIndex = 0;
     while (queue.length > 0) {
       checkCancel();
@@ -206,8 +209,8 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
           Date.now() - t0,
         );
         synthInputs.push({ region: step.region, instruction: step.instruction, output: summary });
-        priorContext +=
-          (priorContext ? "\n\n" : "") + `[${step.region}/${step.tool}] ${summary.slice(0, 1200)}`;
+        runScratch +=
+          (runScratch ? "\n\n" : "") + `[${step.region}/${step.tool}] ${summary.slice(0, 1200)}`;
         await db.update(runsTable).set({ iterations: stepIndex }).where(eq(runsTable.id, runId));
         continue;
       }
@@ -220,12 +223,12 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
       }
       const prompt =
         `Goal: ${goal}\n\nJarvis instruction for you: ${step.instruction}` +
-        (priorContext ? `\n\nWhat earlier regions produced:\n${priorContext}` : "");
+        (runScratch ? `\n\nWhat earlier regions produced:\n${runScratch}` : "");
       const effTemp = effectiveTemperature(region.temperature, mods);
       const output = await callRegion(runId, region, stepIndex, prompt, effTemp);
       synthInputs.push({ region: step.region, instruction: step.instruction, output });
-      priorContext +=
-        (priorContext ? "\n\n" : "") + `[${step.region}] ${output.slice(0, 1200)}`;
+      runScratch +=
+        (runScratch ? "\n\n" : "") + `[${step.region}] ${output.slice(0, 1200)}`;
       await db.update(runsTable).set({ iterations: stepIndex }).where(eq(runsTable.id, runId));
 
       // Apply mid-run adjustments queued by Jarvis chat or external callers
@@ -273,6 +276,7 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
     const goalForSynth = priorContext
       ? `${goal}\n\n(Note: this is a follow-up message in an ongoing conversation. Prior turns:\n${priorContext}\n)`
       : goal;
+    void runScratch; // synthInputs already carries the per-step outputs to Jarvis
     const finalAnswer = await jarvisSynthesize(goalForSynth, synthInputs);
     await recordMessage(
       runId,
