@@ -138,12 +138,120 @@ export default function LiveRun() {
     );
   }
 
+  // Build a "recently fired" map from the message stream so we can render
+  // small activity meters next to each region label, both on mobile (where the
+  // 3D scene is the hero) and desktop (where it sits in the side column).
+  const REGION_ORDER = [
+    "jarvis",
+    "sensory_cortex",
+    "association_cortex",
+    "hippocampus",
+    "prefrontal_cortex",
+    "cerebellum",
+    "motor_cortex",
+  ] as const;
+  const REGION_LABELS: Record<string, string> = {
+    jarvis: "Jarvis",
+    sensory_cortex: "Sensory",
+    association_cortex: "Association",
+    hippocampus: "Hippocampus",
+    prefrontal_cortex: "Prefrontal",
+    cerebellum: "Cerebellum",
+    motor_cortex: "Motor",
+  };
+  const REGION_DOT: Record<string, string> = {
+    jarvis: "bg-white",
+    sensory_cortex: "bg-cyan-400",
+    association_cortex: "bg-orange-400",
+    hippocampus: "bg-emerald-400",
+    prefrontal_cortex: "bg-violet-400",
+    cerebellum: "bg-lime-400",
+    motor_cortex: "bg-rose-400",
+  };
+  const regionFireCount: Record<string, number> = {};
+  for (const m of allMessages) {
+    if (!m.region) continue;
+    regionFireCount[m.region] = (regionFireCount[m.region] ?? 0) + 1;
+  }
+  const isRunning = run.status === "running" || run.status === "pending";
+
+  const BrainPanel = (
+    <Card className="bg-card border-border overflow-hidden">
+      <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+        <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+          Live Brain Topology
+        </h3>
+        <div className="flex items-center gap-2">
+          <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
+            isRunning
+              ? "bg-accent/10 text-accent border-accent/30 animate-pulse"
+              : "bg-muted text-muted-foreground border-border"
+          }`}>
+            {isRunning ? "LIVE" : "IDLE"}
+          </span>
+          <span className="text-[10px] font-mono text-muted-foreground bg-muted px-2 py-0.5 rounded">
+            iter {run.iterations}
+          </span>
+        </div>
+      </div>
+      <div className="relative w-full h-[55vh] sm:h-[60vh] lg:h-[calc(100vh-18rem)] min-h-[320px] max-h-[760px]">
+        <BrainVisual
+          activeRegion={isRunning ? activeRegion || "prefrontal_cortex" : undefined}
+        />
+      </div>
+      <div className="px-3 py-3 border-t border-border bg-background/40">
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-2 xl:grid-cols-4 gap-1.5">
+          {REGION_ORDER.map((key) => {
+            const fires = regionFireCount[key] ?? 0;
+            const isActive = activeRegion === key && isRunning;
+            return (
+              <div
+                key={key}
+                className={`flex items-center justify-between gap-2 px-2 py-1 rounded border text-[10px] font-mono transition-all ${
+                  isActive
+                    ? "border-accent/60 bg-accent/10 shadow-[0_0_8px_hsl(var(--accent)/0.3)]"
+                    : "border-border bg-muted/30"
+                }`}
+              >
+                <span className="flex items-center gap-1.5 truncate">
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${REGION_DOT[key]} ${isActive ? "animate-pulse" : "opacity-60"}`}
+                  />
+                  <span className="truncate">{REGION_LABELS[key]}</span>
+                </span>
+                <span className="text-muted-foreground tabular-nums">{fires}</span>
+              </div>
+            );
+          })}
+        </div>
+        <p className="mt-2 text-[10px] text-muted-foreground text-center">
+          Drag to orbit · pinch / scroll to zoom · tap a label to focus · double-tap to reset
+        </p>
+        {isRunning && (
+          <Button
+            variant="destructive"
+            size="sm"
+            className="w-full mt-2"
+            onClick={handleCancel}
+            disabled={cancelRun.isPending}
+          >
+            <XCircle className="w-3.5 h-3.5 mr-1.5" />
+            Abort Process
+          </Button>
+        )}
+      </div>
+    </Card>
+  );
+
   return (
     <Layout>
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        
+      {/* Mobile: brain is the hero, stacked above transcript.
+          Desktop: brain becomes a sticky right column. */}
+      <div className="lg:hidden mb-6">{BrainPanel}</div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 lg:gap-8">
         {/* Main Content: Goal & Transcript */}
-        <div className="lg:col-span-2 space-y-6">
+        <div className="lg:col-span-3 space-y-6">
           <Card className="bg-card border-primary/20">
             <CardHeader className="pb-4">
               <div className="flex items-center justify-between">
@@ -259,32 +367,10 @@ export default function LiveRun() {
           </div>
         </div>
 
-        {/* Side Panel: Live Brain & Controls */}
-        <div className="space-y-6">
-          <Card className="bg-card border-border flex flex-col items-center justify-center p-6 min-h-[300px] sticky top-6">
-            <div className="w-full flex justify-between items-center mb-6">
-              <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Live Activity</h3>
-              <div className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded">
-                Iter {run.iterations}
-              </div>
-            </div>
-            
-            <BrainVisual activeRegion={run.status === 'running' ? (activeRegion || "prefrontal_cortex") : undefined} className="mb-6" />
-
-            {run.status === 'running' && (
-              <Button 
-                variant="destructive" 
-                className="w-full" 
-                onClick={handleCancel}
-                disabled={cancelRun.isPending}
-              >
-                <XCircle className="w-4 h-4 mr-2" />
-                Abort Process
-              </Button>
-            )}
-          </Card>
+        {/* Desktop side panel: sticky brain */}
+        <div className="hidden lg:block lg:col-span-2">
+          <div className="sticky top-6">{BrainPanel}</div>
         </div>
-
       </div>
     </Layout>
   );

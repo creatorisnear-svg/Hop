@@ -34,12 +34,12 @@ const REGION_LABELS: Record<string, string> = {
 
 const REGION_LAYOUT: Record<string, { x: number; y: number; z: number }> = {
   jarvis: { x: 0.0, y: 0.1, z: 0.0 },
-  prefrontal_cortex: { x: -0.85, y: 0.9, z: 0.1 },
-  motor_cortex: { x: 0.85, y: 0.9, z: 0.1 },
-  sensory_cortex: { x: 1.1, y: -0.05, z: 0.4 },
-  association_cortex: { x: -1.1, y: -0.05, z: 0.4 },
-  hippocampus: { x: -0.55, y: -0.85, z: 0.2 },
-  cerebellum: { x: 0.55, y: -0.85, z: 0.2 },
+  prefrontal_cortex: { x: -0.95, y: 0.95, z: 0.1 },
+  motor_cortex: { x: 0.95, y: 0.95, z: 0.1 },
+  sensory_cortex: { x: 1.2, y: -0.05, z: 0.4 },
+  association_cortex: { x: -1.2, y: -0.05, z: 0.4 },
+  hippocampus: { x: -0.6, y: -0.95, z: 0.2 },
+  cerebellum: { x: 0.6, y: -0.95, z: 0.2 },
 };
 
 // Jarvis is the hub — all regions connect through it.
@@ -56,6 +56,41 @@ const CONNECTIONS: [string, string][] = [
   ["prefrontal_cortex", "motor_cortex"],
   ["hippocampus", "prefrontal_cortex"],
 ];
+
+/**
+ * Build a distinctive 3D mesh per region. Each region is a small "organ"
+ * made of three layers:
+ *  - core: a solid emissive mesh whose intensity & scale react to activity
+ *  - wire: a slightly larger wireframe shell that spins
+ *  - halo: a billboard sprite that pulses outward with activity
+ */
+function buildRegionGeometry(key: string): THREE.BufferGeometry {
+  switch (key) {
+    case "jarvis":
+      // Central hub — high-detail icosahedron, reads as a glowing brain core.
+      return new THREE.IcosahedronGeometry(0.42, 2);
+    case "prefrontal_cortex":
+      // Executive function — clean faceted dodecahedron.
+      return new THREE.DodecahedronGeometry(0.32, 0);
+    case "motor_cortex":
+      // Action — sharp octahedron.
+      return new THREE.OctahedronGeometry(0.34, 0);
+    case "sensory_cortex":
+      // Intricate sensory input — torus knot.
+      return new THREE.TorusKnotGeometry(0.22, 0.07, 96, 12, 2, 3);
+    case "association_cortex":
+      // Broad connectivity — high-detail icosahedron displaced.
+      return new THREE.IcosahedronGeometry(0.32, 1);
+    case "hippocampus":
+      // Memory loop — torus.
+      return new THREE.TorusGeometry(0.24, 0.08, 16, 48);
+    case "cerebellum":
+      // Folded folia — twisted torus knot, denser windings.
+      return new THREE.TorusKnotGeometry(0.22, 0.05, 128, 12, 4, 5);
+    default:
+      return new THREE.SphereGeometry(0.3, 24, 24);
+  }
+}
 
 function createNeuronTexture(): THREE.CanvasTexture {
   const size = 64;
@@ -77,20 +112,23 @@ function createNeuronTexture(): THREE.CanvasTexture {
   return tex;
 }
 
-function generateRegionPoints(count: number, radius: number): Float32Array {
-  const arr = new Float32Array(count * 3);
-  for (let i = 0; i < count; i++) {
-    // Random point in sphere via rejection-free method
-    const u = Math.random();
-    const v = Math.random();
-    const theta = 2 * Math.PI * u;
-    const phi = Math.acos(2 * v - 1);
-    const r = radius * Math.cbrt(Math.random());
-    arr[i * 3] = r * Math.sin(phi) * Math.cos(theta);
-    arr[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
-    arr[i * 3 + 2] = r * Math.cos(phi);
-  }
-  return arr;
+function createHaloTexture(): THREE.CanvasTexture {
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  const half = size / 2;
+  const g = ctx.createRadialGradient(half, half, half * 0.05, half, half, half);
+  g.addColorStop(0, "rgba(255,255,255,0.95)");
+  g.addColorStop(0.25, "rgba(255,255,255,0.45)");
+  g.addColorStop(0.55, "rgba(255,255,255,0.12)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.needsUpdate = true;
+  return tex;
 }
 
 interface Signal {
@@ -151,11 +189,18 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
       height = 300;
     }
 
+    const isMobile = Math.min(width, height) < 480;
+
     const scene = new THREE.Scene();
     scene.background = null;
 
-    const camera = new THREE.PerspectiveCamera(55, width / height, 0.01, 100);
-    camera.position.set(0, 0.2, 3.6);
+    const camera = new THREE.PerspectiveCamera(
+      isMobile ? 62 : 55,
+      width / height,
+      0.01,
+      100,
+    );
+    camera.position.set(0, 0.25, isMobile ? 4.4 : 3.8);
 
     let renderer: THREE.WebGLRenderer;
     try {
@@ -173,94 +218,128 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.15;
+    renderer.toneMappingExposure = 1.2;
     container.appendChild(renderer.domElement);
     renderer.domElement.style.display = "block";
+    renderer.domElement.style.touchAction = "none"; // prevent page-scroll while orbiting on mobile
 
     const composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
     const bloom = new UnrealBloomPass(
       new THREE.Vector2(width, height),
-      0.7,
+      isMobile ? 0.55 : 0.75,
       0.4,
-      0.2,
+      0.18,
     );
     composer.addPass(bloom);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.05;
-    controls.rotateSpeed = 0.5;
+    controls.dampingFactor = 0.06;
+    controls.rotateSpeed = isMobile ? 0.7 : 0.5;
     controls.enablePan = false;
     controls.enableZoom = true;
+    controls.zoomSpeed = isMobile ? 0.7 : 0.9;
     controls.autoRotate = true;
-    controls.autoRotateSpeed = 0.4;
+    controls.autoRotateSpeed = 0.35;
     controls.target.set(0, 0.05, 0);
-    controls.minDistance = 2.4;
-    controls.maxDistance = 7;
+    controls.minDistance = isMobile ? 2.8 : 2.4;
+    controls.maxDistance = isMobile ? 8 : 7;
 
-    scene.add(new THREE.AmbientLight(0x223355, 0.5));
-    const centerLight = new THREE.PointLight(0x3355aa, 0.8, 8);
+    // Lighting — ambient + a couple of directional rims so the 3D meshes
+    // actually read as solids rather than flat silhouettes.
+    scene.add(new THREE.AmbientLight(0x223355, 0.55));
+    const keyLight = new THREE.DirectionalLight(0x88aaff, 0.6);
+    keyLight.position.set(2, 3, 4);
+    scene.add(keyLight);
+    const rimLight = new THREE.DirectionalLight(0xff88aa, 0.35);
+    rimLight.position.set(-3, -1, -2);
+    scene.add(rimLight);
+    const centerLight = new THREE.PointLight(0x3355aa, 1.0, 8);
     centerLight.position.set(0, 0.2, 0);
     scene.add(centerLight);
 
     const neuronTex = createNeuronTexture();
+    const haloTex = createHaloTexture();
 
-    // Build neurons + glow per region
+    // Build a 3D model per region (core + wire + halo + label).
     type RegionRefs = {
-      base: Float32Array;
-      points: THREE.Points;
-      glow: THREE.Points;
+      group: THREE.Group;
+      core: THREE.Mesh;
+      coreMat: THREE.MeshStandardMaterial;
+      wire: THREE.LineSegments;
+      wireMat: THREE.LineBasicMaterial;
+      halo: THREE.Sprite;
+      haloMat: THREE.SpriteMaterial;
       labelEl: HTMLDivElement;
-      activity: number; // 0..1, decays over time
+      activity: number; // 0..1, eased toward target each frame
+      baseScale: number;
+      spinAxis: THREE.Vector3;
+      spinSpeed: number;
     };
     const regionRefs: Record<string, RegionRefs> = {};
 
     for (const [key, layout] of Object.entries(REGION_LAYOUT)) {
-      const color = REGION_COLORS[key] ?? 0xffffff;
+      const colorHex = REGION_COLORS[key] ?? 0xffffff;
+      const color = new THREE.Color(colorHex);
       const isHub = key === "jarvis";
-      const count = isHub ? 380 : 220;
-      const localPts = generateRegionPoints(count, isHub ? 0.22 : 0.32);
-      const positions = new Float32Array(count * 3);
-      for (let i = 0; i < count; i++) {
-        positions[i * 3] = localPts[i * 3] + layout.x;
-        positions[i * 3 + 1] = localPts[i * 3 + 1] + layout.y;
-        positions[i * 3 + 2] = localPts[i * 3 + 2] + layout.z;
-      }
-      const base = new Float32Array(positions);
 
-      const geom = new THREE.BufferGeometry();
-      geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-      const mat = new THREE.PointsMaterial({
-        color,
-        size: 0.025,
-        map: neuronTex,
+      const group = new THREE.Group();
+      group.position.set(layout.x, layout.y, layout.z);
+      scene.add(group);
+
+      // Core solid mesh — emissive so it glows through the bloom pass.
+      const geom = buildRegionGeometry(key);
+      const coreMat = new THREE.MeshStandardMaterial({
+        color: color.clone().multiplyScalar(0.35),
+        emissive: color.clone(),
+        emissiveIntensity: isHub ? 0.9 : 0.55,
+        metalness: 0.4,
+        roughness: 0.35,
+        flatShading: key === "prefrontal_cortex" || key === "motor_cortex",
         transparent: true,
-        opacity: 0.85,
+        opacity: 0.92,
+      });
+      const core = new THREE.Mesh(geom, coreMat);
+      group.add(core);
+
+      // Wireframe shell — slightly larger, spins independently for life.
+      const wireGeom = new THREE.WireframeGeometry(geom);
+      const wireMat = new THREE.LineBasicMaterial({
+        color: color.clone(),
+        transparent: true,
+        opacity: 0.35,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
-        sizeAttenuation: true,
       });
-      const points = new THREE.Points(geom, mat);
-      scene.add(points);
+      const wire = new THREE.LineSegments(wireGeom, wireMat);
+      wire.scale.setScalar(1.18);
+      group.add(wire);
 
-      const glowGeom = geom.clone();
-      const glowMat = new THREE.PointsMaterial({
-        color,
-        size: 0.07,
-        map: neuronTex,
+      // Halo billboard — fades up while the region is active.
+      const haloMat = new THREE.SpriteMaterial({
+        map: haloTex,
+        color: color.clone(),
         transparent: true,
-        opacity: 0.18,
+        opacity: 0.0,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
-        sizeAttenuation: true,
       });
-      const glow = new THREE.Points(glowGeom, glowMat);
-      scene.add(glow);
+      const halo = new THREE.Sprite(haloMat);
+      halo.scale.setScalar(isHub ? 1.6 : 1.2);
+      group.add(halo);
 
-      // Label
+      // Per-region spin axis so each model rotates with its own personality.
+      const spinAxis = new THREE.Vector3(
+        Math.sin(key.length * 1.13),
+        Math.cos(key.length * 0.71),
+        Math.sin(key.length * 0.47),
+      ).normalize();
+      const spinSpeed = isHub ? 0.18 : 0.25 + (key.charCodeAt(0) % 5) * 0.04;
+
+      // DOM label
       const labelEl = document.createElement("div");
-      const colorHex = "#" + color.toString(16).padStart(6, "0");
+      const colorCss = "#" + colorHex.toString(16).padStart(6, "0");
       labelEl.textContent = REGION_LABELS[key] ?? key;
       labelEl.dataset.regionKey = key;
       labelEl.style.cssText = `
@@ -269,12 +348,12 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
         cursor: pointer;
         user-select: none;
         font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
-        font-size: 9px;
+        font-size: ${isMobile ? 10 : 9}px;
         letter-spacing: 1.5px;
         padding: 2px 6px;
-        background: rgba(0,0,0,0.45);
-        color: ${colorHex};
-        border: 1px solid ${colorHex}40;
+        background: rgba(0,0,0,0.55);
+        color: ${colorCss};
+        border: 1px solid ${colorCss}40;
         border-radius: 3px;
         backdrop-filter: blur(4px);
         white-space: nowrap;
@@ -282,14 +361,16 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
         transition: opacity 0.2s, background 0.2s, border-color 0.2s, transform 0.2s;
         will-change: transform, left, top;
       `;
-      labelEl.addEventListener("mouseenter", () => {
-        labelEl.style.background = "rgba(0,0,0,0.75)";
-        labelEl.style.borderColor = colorHex;
-      });
-      labelEl.addEventListener("mouseleave", () => {
-        labelEl.style.background = "rgba(0,0,0,0.45)";
-        labelEl.style.borderColor = colorHex + "40";
-      });
+      const onEnter = () => {
+        labelEl.style.background = "rgba(0,0,0,0.8)";
+        labelEl.style.borderColor = colorCss;
+      };
+      const onLeave = () => {
+        labelEl.style.background = "rgba(0,0,0,0.55)";
+        labelEl.style.borderColor = colorCss + "40";
+      };
+      labelEl.addEventListener("mouseenter", onEnter);
+      labelEl.addEventListener("mouseleave", onLeave);
       labelEl.addEventListener("click", (e) => {
         e.stopPropagation();
         focusTargetRef.current = key;
@@ -299,7 +380,21 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
       });
       labelLayer.appendChild(labelEl);
 
-      regionRefs[key] = { base, points, glow, labelEl, activity: 0 };
+      regionRefs[key] = {
+        group,
+        core,
+        coreMat,
+        wire,
+        wireMat,
+        halo,
+        haloMat,
+        labelEl,
+        activity: 0,
+        baseScale: isHub ? 1.15 : 0.95,
+        spinAxis,
+        spinSpeed,
+      };
+      group.scale.setScalar(regionRefs[key].baseScale);
     }
 
     // Connection lines: always include the hardcoded topology, plus add an
@@ -316,14 +411,13 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
     const lineGroup = new THREE.Group();
     const edgeRefs: EdgeRef[] = [];
     const seenEdges = new Set<string>();
-    const baseColor = new THREE.Color(0x335577);
-    const hotColor = new THREE.Color(0xffb347); // warm amber for strong pathways
+    const baseEdgeColor = new THREE.Color(0x335577);
+    const hotEdgeColor = new THREE.Color(0xffb347);
 
     function addEdge(a: string, b: string) {
       const la = REGION_LAYOUT[a];
       const lb = REGION_LAYOUT[b];
       if (!la || !lb) return;
-      // Treat edges as undirected for visualization
       const key = a < b ? `${a}|${b}` : `${b}|${a}`;
       if (seenEdges.has(key)) return;
       seenEdges.add(key);
@@ -332,31 +426,34 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
         new THREE.Vector3(lb.x, lb.y, lb.z),
       ]);
       const mat = new THREE.LineBasicMaterial({
-        color: baseColor.clone(),
+        color: baseEdgeColor.clone(),
         transparent: true,
         opacity: 0.22,
         blending: THREE.AdditiveBlending,
+        depthWrite: false,
       });
       lineGroup.add(new THREE.Line(geo, mat));
-      edgeRefs.push({ from: a, to: b, mat, baseColor, hotColor });
+      edgeRefs.push({
+        from: a,
+        to: b,
+        mat,
+        baseColor: baseEdgeColor,
+        hotColor: hotEdgeColor,
+      });
     }
     for (const [a, b] of CONNECTIONS) addEdge(a, b);
-    // Pull in any learned pairs already known at mount time so they appear
-    // immediately. (Pairs learned later still light up the matching base edge
-    // via the animation loop, but won't add new geometry post-mount.)
     for (const key of Object.keys(synStrengthRef.current)) {
       const [a, b] = key.split("->");
       if (a && b) addEdge(a, b);
     }
     scene.add(lineGroup);
 
-    // Look up undirected learned strength for an edge (max of either direction)
     function edgeStrength(a: string, b: string): number {
       const m = synStrengthRef.current;
       return Math.max(m[`${a}->${b}`] ?? 0, m[`${b}->${a}`] ?? 0);
     }
 
-    // Signal particles
+    // Signal particles — synaptic pulses traveling along edges.
     const MAX_SIGNALS = 80;
     const signals: Signal[] = [];
     for (let i = 0; i < MAX_SIGNALS; i++) {
@@ -375,12 +472,12 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
     const sigPos = new Float32Array(MAX_SIGNALS * 3);
     const sigCol = new Float32Array(MAX_SIGNALS * 3);
     for (let i = 0; i < MAX_SIGNALS; i++) {
-      sigPos[i * 3 + 1] = -100; // hide
+      sigPos[i * 3 + 1] = -100;
     }
     sigGeo.setAttribute("position", new THREE.BufferAttribute(sigPos, 3));
     sigGeo.setAttribute("color", new THREE.BufferAttribute(sigCol, 3));
     const sigMat = new THREE.PointsMaterial({
-      size: 0.045,
+      size: 0.06,
       map: neuronTex,
       transparent: true,
       opacity: 1,
@@ -426,13 +523,12 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
       const dt = Math.min(clock.getDelta(), 0.05);
       timeAcc += dt;
 
-      // Drive activity from a TRAIL of recently-active regions, so when the
-      // brain cycles through SC -> AC -> HC -> PFC -> ... each one keeps glowing
-      // for a few seconds before fading.
+      // Drive activity from a TRAIL of recently-active regions.
       const active = activeRegionRef.current;
       const now = performance.now();
-      const TRAIL_HOLD_MS = 2200;   // full intensity for this long after firing
-      const TRAIL_FADE_MS = 6000;   // total decay window
+      const TRAIL_HOLD_MS = 2200;
+      const TRAIL_FADE_MS = 6000;
+
       for (const [key, r] of Object.entries(regionRefs)) {
         const lastAt = lastActiveAtRef.current[key] ?? -Infinity;
         const sinceMs = now - lastAt;
@@ -440,64 +536,63 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
         if (sinceMs <= TRAIL_HOLD_MS) {
           trail = 1;
         } else if (sinceMs < TRAIL_FADE_MS) {
-          trail = 1 - (sinceMs - TRAIL_HOLD_MS) / (TRAIL_FADE_MS - TRAIL_HOLD_MS);
+          trail =
+            1 - (sinceMs - TRAIL_HOLD_MS) / (TRAIL_FADE_MS - TRAIL_HOLD_MS);
         }
-        // The currently-active region is pinned to 1; others use trail
         const target = key === active ? 1 : Math.max(0.05, trail);
-        // ease toward target
         r.activity += (target - r.activity) * Math.min(1, dt * 3);
 
-        const phase = timeAcc * 1.4 + key.length * 0.4;
-        const pulse = Math.sin(phase) * 0.12 + 0.9;
-        r.points.material.opacity = (0.45 + r.activity * 0.5) * pulse;
-        r.points.material.size = 0.022 + r.activity * 0.018;
-        r.glow.material.opacity = (0.12 + r.activity * 0.35) * pulse;
-        r.glow.material.size = 0.06 + r.activity * 0.06;
+        const breathe = 0.92 + Math.sin(timeAcc * 1.6 + key.length) * 0.08;
 
-        // Jitter when active
-        if (r.activity > 0.15) {
-          const arr = r.points.geometry.attributes.position.array as Float32Array;
-          const base = r.base;
-          const jit = Math.min(r.activity * 0.04, 0.025);
-          const stride = 3 * 3; // every 3rd point per frame
-          for (let i = 0; i < arr.length; i += stride) {
-            arr[i] = base[i] + (Math.random() - 0.5) * jit;
-            arr[i + 1] = base[i + 1] + (Math.random() - 0.5) * jit;
-            arr[i + 2] = base[i + 2] + (Math.random() - 0.5) * jit;
-          }
-          r.points.geometry.attributes.position.needsUpdate = true;
-        }
+        // Core: emissive intensity + scale react to activity.
+        r.coreMat.emissiveIntensity = (0.35 + r.activity * 1.4) * breathe;
+        r.coreMat.opacity = 0.65 + r.activity * 0.35;
+
+        // Wire: brighter + faster spin when active.
+        r.wireMat.opacity = 0.18 + r.activity * 0.55;
+
+        // Halo: blooms outward with activity.
+        r.haloMat.opacity = r.activity * 0.85;
+        const haloScale =
+          (key === "jarvis" ? 1.6 : 1.2) * (1 + r.activity * 0.45);
+        r.halo.scale.setScalar(haloScale);
+
+        // Group scale pulses gently while active.
+        const s =
+          r.baseScale *
+          (1 + r.activity * 0.18 + Math.sin(timeAcc * 3 + key.length) * 0.02);
+        r.group.scale.setScalar(s);
+
+        // Spin: independent per region, faster when firing.
+        const spin = r.spinSpeed * (0.6 + r.activity * 1.8);
+        r.core.rotateOnAxis(r.spinAxis, spin * dt);
+        r.wire.rotateOnAxis(r.spinAxis, -spin * 1.4 * dt);
       }
 
-      // Animate edge brightness from learned synapse strength so pathways the
-      // brain actually uses glow brighter than dormant ones.
+      // Animate edge brightness from learned synapse strength.
       for (const e of edgeRefs) {
-        const strength = edgeStrength(e.from, e.to); // 0..1
+        const strength = edgeStrength(e.from, e.to);
         const isActiveEdge = active === e.from || active === e.to;
-        // Subtle breathing for hot edges
         const breathe = 0.85 + Math.sin(timeAcc * 2 + e.from.length) * 0.15;
         const targetOpacity =
-          (0.18 + strength * 0.55 + (isActiveEdge ? 0.2 : 0)) * breathe;
+          (0.18 + strength * 0.55 + (isActiveEdge ? 0.25 : 0)) * breathe;
         e.mat.opacity += (targetOpacity - e.mat.opacity) * Math.min(1, dt * 4);
-        // Lerp color from cool baseline to warm amber as strength grows
         e.mat.color.copy(e.baseColor).lerp(e.hotColor, Math.min(1, strength));
       }
 
-      // Spawn signals from / to active region along its connections, biased
-      // toward pathways with higher learned strength.
+      // Spawn signals along the active region's connections.
       if (active && timeAcc - lastSpawnRef.current > 0.05) {
         lastSpawnRef.current = timeAcc;
         const color = REGION_COLORS[active] ?? 0xffffff;
-        // Build weighted peer list from any edge touching the active region.
         const peers = edgeRefs
           .filter((e) => e.from === active || e.to === active)
           .map((e) => {
             const other = e.from === active ? e.to : e.from;
-            const w = 0.3 + edgeStrength(e.from, e.to) * 0.9; // 0.3..1.2
+            const w = 0.3 + edgeStrength(e.from, e.to) * 0.9;
             return { other, w };
           });
         if (peers.length > 0 && Math.random() < 0.7) {
-          const totalW = peers.reduce((s, p) => s + p.w, 0);
+          const totalW = peers.reduce((sum, p) => sum + p.w, 0);
           let pick = Math.random() * totalW;
           let chosen = peers[0];
           for (const p of peers) {
@@ -507,7 +602,6 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
               break;
             }
           }
-          // direction: outgoing from active most of the time
           if (Math.random() < 0.7) {
             spawnSignal(active, chosen.other, color);
           } else {
@@ -554,7 +648,7 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
       const v = new THREE.Vector3();
       for (const [key, r] of Object.entries(regionRefs)) {
         const layout = REGION_LAYOUT[key];
-        v.set(layout.x, layout.y + 0.35, layout.z);
+        v.set(layout.x, layout.y + 0.55, layout.z);
         v.project(camera);
         const x = (v.x * 0.5 + 0.5) * w;
         const y = (-v.y * 0.5 + 0.5) * h;
@@ -566,7 +660,7 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
           const dist = camera.position.distanceTo(
             new THREE.Vector3(layout.x, layout.y, layout.z),
           );
-          const op = Math.max(0.25, Math.min(1, 1 - (dist - 2.5) / 4));
+          const op = Math.max(0.3, Math.min(1, 1 - (dist - 2.5) / 4));
           r.labelEl.style.opacity = String(op);
         }
       }
@@ -582,17 +676,19 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
           controls.target.x += (tx - controls.target.x) * Math.min(1, dt * 2.5);
           controls.target.y += (ty - controls.target.y) * Math.min(1, dt * 2.5);
           controls.target.z += (tz - controls.target.z) * Math.min(1, dt * 2.5);
-          // Pull the camera in a bit toward this region
-          const desiredDist = 2.6;
+          const desiredDist = isMobile ? 3.0 : 2.6;
           const dir = new THREE.Vector3()
             .subVectors(camera.position, controls.target)
             .normalize();
           const targetCam = new THREE.Vector3()
             .copy(controls.target)
             .addScaledVector(dir, desiredDist);
-          camera.position.x += (targetCam.x - camera.position.x) * Math.min(1, dt * 2.5);
-          camera.position.y += (targetCam.y - camera.position.y) * Math.min(1, dt * 2.5);
-          camera.position.z += (targetCam.z - camera.position.z) * Math.min(1, dt * 2.5);
+          camera.position.x +=
+            (targetCam.x - camera.position.x) * Math.min(1, dt * 2.5);
+          camera.position.y +=
+            (targetCam.y - camera.position.y) * Math.min(1, dt * 2.5);
+          camera.position.z +=
+            (targetCam.z - camera.position.z) * Math.min(1, dt * 2.5);
         }
       }
 
@@ -601,14 +697,13 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
     }
     animate();
 
-    // Double-click on empty canvas: reset focus + resume auto-rotate
     const onDblClick = () => {
       focusTargetRef.current = null;
       controls.autoRotate = true;
     };
     renderer.domElement.addEventListener("dblclick", onDblClick);
 
-    // Resize observer
+    // Resize observer — keeps the scene fluid on rotate / window resize.
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const w = Math.max(1, entry.contentRect.width);
@@ -627,12 +722,12 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
       ro.disconnect();
       renderer.domElement.removeEventListener("dblclick", onDblClick);
       controls.dispose();
-      // Dispose three resources
       for (const r of Object.values(regionRefs)) {
-        r.points.geometry.dispose();
-        (r.points.material as THREE.Material).dispose();
-        r.glow.geometry.dispose();
-        (r.glow.material as THREE.Material).dispose();
+        r.core.geometry.dispose();
+        r.coreMat.dispose();
+        r.wire.geometry.dispose();
+        r.wireMat.dispose();
+        r.haloMat.dispose();
         r.labelEl.remove();
       }
       lineGroup.children.forEach((c) => {
@@ -643,6 +738,7 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
       sigGeo.dispose();
       sigMat.dispose();
       neuronTex.dispose();
+      haloTex.dispose();
       composer.dispose();
       renderer.dispose();
       if (renderer.domElement.parentElement === container) {
@@ -658,7 +754,7 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
   return (
     <div
       className={cn(
-        "relative w-full aspect-square overflow-hidden rounded-lg",
+        "relative w-full h-full min-h-[260px] overflow-hidden rounded-lg",
         className,
       )}
     >
@@ -681,7 +777,6 @@ function BrainVisualFallback({ activeRegion, className }: BrainVisualProps) {
     { key: "hippocampus", label: "HC", x: 25, y: 82 },
     { key: "cerebellum", label: "CB", x: 75, y: 82 },
   ];
-  // 0=jarvis at center; spokes 1..6 + a couple of cross-links
   const edges: [number, number][] = [
     [0, 1], [0, 2], [0, 3], [0, 4], [0, 5], [0, 6],
     [4, 1], [3, 2], [1, 5], [2, 6], [5, 6],
@@ -689,7 +784,7 @@ function BrainVisualFallback({ activeRegion, className }: BrainVisualProps) {
   return (
     <div
       className={cn(
-        "relative w-full aspect-square overflow-hidden rounded-lg bg-black/40",
+        "relative w-full h-full min-h-[260px] overflow-hidden rounded-lg bg-black/40",
         className,
       )}
     >
@@ -725,18 +820,13 @@ function BrainVisualFallback({ activeRegion, className }: BrainVisualProps) {
           >
             <div
               className={cn(
-                "h-3 w-3 rounded-full transition-all duration-300",
+                "h-3 w-3 rounded-full transition-all",
                 active
-                  ? "scale-150 bg-accent shadow-[0_0_15px_hsl(var(--accent))] animate-pulse"
-                  : "bg-primary/50 shadow-[0_0_5px_hsl(var(--primary)/0.5)]",
+                  ? "bg-accent shadow-[0_0_12px_hsl(var(--accent))] scale-150"
+                  : "bg-primary/60",
               )}
             />
-            <span
-              className={cn(
-                "mt-1 font-mono text-[9px] transition-colors",
-                active ? "font-bold text-accent" : "text-muted-foreground",
-              )}
-            >
+            <span className="mt-1 text-[9px] tracking-widest text-muted-foreground">
               {n.label}
             </span>
           </div>
