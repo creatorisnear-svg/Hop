@@ -460,6 +460,150 @@ reg({
   },
 });
 
+// ----- Autonomous (GitHub + Koyeb) -----
+// These delegate to the agent tool registry, which audits every call to the
+// jarvis_actions table and enforces the JARVIS_AUTONOMY kill switch.
+const AUTONOMY_TOOLS: Array<{ name: string; description: string; parameters: Record<string, unknown> }> = [
+  {
+    name: "github_list_commits",
+    description: "List the most recent commits on the configured repo branch. Use to check what's deployed or to verify a commit landed.",
+    parameters: {
+      type: "object",
+      properties: { limit: { type: "integer", description: "1-50, default 10" } },
+    },
+  },
+  {
+    name: "github_read_file",
+    description: "Read a file from the configured repo. ALWAYS use this after github_write_file to verify the change actually landed.",
+    parameters: {
+      type: "object",
+      required: ["path"],
+      properties: {
+        path: { type: "string" },
+        ref: { type: "string", description: "Optional branch/tag/sha" },
+      },
+    },
+  },
+  {
+    name: "github_write_file",
+    description: "Create or update a file in the configured repo (commits to the given branch, default main). Only use when the user explicitly asks Jarvis to edit code or a file.",
+    parameters: {
+      type: "object",
+      required: ["path", "content", "message"],
+      properties: {
+        path: { type: "string" },
+        content: { type: "string" },
+        message: { type: "string", description: "Commit message" },
+        branch: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "github_create_branch",
+    description: "Create a new branch off another branch (default main).",
+    parameters: {
+      type: "object",
+      required: ["name"],
+      properties: {
+        name: { type: "string" },
+        from: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "github_open_pr",
+    description: "Open a pull request from `head` into `base` (default base: main).",
+    parameters: {
+      type: "object",
+      required: ["title", "head"],
+      properties: {
+        title: { type: "string" },
+        body: { type: "string" },
+        head: { type: "string" },
+        base: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "github_merge_pr",
+    description: "Merge an open pull request by number. Only on explicit user request.",
+    parameters: {
+      type: "object",
+      required: ["number"],
+      properties: {
+        number: { type: "integer" },
+        method: { type: "string", description: "merge | squash | rebase (default squash)" },
+      },
+    },
+  },
+  {
+    name: "koyeb_list_services",
+    description: "List all Koyeb services. Use to find a service id before any other Koyeb action.",
+    parameters: { type: "object", properties: {} },
+  },
+  {
+    name: "koyeb_get_logs",
+    description: "Fetch recent log lines from a Koyeb service. Use to verify the service is healthy after a deploy or to debug errors the user reports.",
+    parameters: {
+      type: "object",
+      required: ["serviceId"],
+      properties: {
+        serviceId: { type: "string" },
+        limit: { type: "integer", description: "1-500, default 100" },
+      },
+    },
+  },
+  {
+    name: "koyeb_redeploy",
+    description: "Trigger a redeploy of a Koyeb service. After calling, ALWAYS verify by calling koyeb_list_services or koyeb_get_logs to confirm the new deployment came up healthy.",
+    parameters: {
+      type: "object",
+      required: ["serviceId"],
+      properties: { serviceId: { type: "string" } },
+    },
+  },
+  {
+    name: "koyeb_pause_service",
+    description: "Pause (stop) a Koyeb service without deleting it.",
+    parameters: {
+      type: "object",
+      required: ["serviceId"],
+      properties: { serviceId: { type: "string" } },
+    },
+  },
+  {
+    name: "koyeb_resume_service",
+    description: "Resume a paused Koyeb service.",
+    parameters: {
+      type: "object",
+      required: ["serviceId"],
+      properties: { serviceId: { type: "string" } },
+    },
+  },
+  {
+    name: "koyeb_delete_service",
+    description: "PERMANENTLY delete a Koyeb service. CANNOT be undone. Only use when the user explicitly says to delete it. Always confirm by name in your reply before calling this.",
+    parameters: {
+      type: "object",
+      required: ["serviceId"],
+      properties: { serviceId: { type: "string" } },
+    },
+  },
+];
+
+for (const t of AUTONOMY_TOOLS) {
+  reg({
+    name: t.name,
+    description: t.description,
+    parameters: t.parameters,
+    async run(args) {
+      const result = await invokeTool(t.name, args);
+      if (!result.ok) throw new Error(result.error ?? "tool failed");
+      return result.result;
+    },
+  });
+}
+
 export function listJarvisTools(): JarvisTool[] {
   return [...tools];
 }
