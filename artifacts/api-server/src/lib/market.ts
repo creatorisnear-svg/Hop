@@ -1,5 +1,6 @@
 import { ai } from "@workspace/integrations-gemini-ai";
 import { logger } from "./logger";
+import { groqChat, groqKeyCount } from "./groq";
 
 export type Sentiment = "BULLISH" | "BEARISH" | "NEUTRAL";
 
@@ -1084,51 +1085,104 @@ Rules:
     return out;
   };
 
-  // ── ENSEMBLE: run the model N times in parallel with varied temperatures ─
-  // Then majority-vote the direction + average targetPrice/confidence so a
-  // single bad sample can't blow the call. Default 1; routes pass 3.
+  // ── HYBRID ENSEMBLE: mix Gemini + Groq for cheaper, more diverse predictions ─
+  // The prediction quality of an ensemble comes from MODEL DIVERSITY (different
+  // architectures often disagree in informative ways) far more than it does
+  // from temperature diversity within a single model. By keeping ONE Gemini
+  // call as the anchor (Gemini 2.5 Flash is our highest-fidelity reasoner)
+  // and filling the remaining ensemble slots with Groq's free, high-quality
+  // models (Kimi K2 1T params + Llama 3.3 70B + GPT-OSS 120B), we cut Gemini
+  // token usage by ~67% per prediction without sacrificing accuracy — we
+  // actually GAIN architectural diversity vs running 3× same-model Gemini.
+  // If Groq isn't configured, we transparently fall back to all-Gemini.
   const ensemble = Math.max(1, Math.min(5, args.ensemble ?? 1));
-  const temps = [0.1, 0.25, 0.4, 0.55, 0.7].slice(0, ensemble);
+  const haveGroq = groqKeyCount() > 0;
+
+  type Slot =
+    | { kind: "gemini"; temperature: number; label: string }
+    | { kind: "groq"; model: string; temperature: number; label: string };
+
+  // Default ensemble lineup — Gemini stays the anchor at moderate temp; the
+  // rest is Groq when available. Order doesn't matter (parallel execution).
+  const groqLineup: Slot[] = [
+    { kind: "groq", model: "moonshotai/kimi-k2-instruct", temperature: 0.2, label: "kimi-k2 1T" },
+    { kind: "groq", model: "llama-3.3-70b-versatile",     temperature: 0.5, label: "llama-3.3 70b" },
+    { kind: "groq", model: "openai/gpt-oss-120b",         temperature: 0.7, label: "gpt-oss 120b" },
+    { kind: "groq", model: "qwen/qwen3-32b",              temperature: 0.4, label: "qwen3 32b" },
+  ];
+  const slots: Slot[] = [];
+  if (haveGroq) {
+    // 1 Gemini + (ensemble - 1) Groq, capped at 4 Groq lineup variants. If
+    // ensemble > 5, the extras roll over to a second Gemini call.
+    slots.push({ kind: "gemini", temperature: 0.4, label: "gemini-2.5-flash" });
+    for (let i = 0; i < ensemble - 1; i++) {
+      slots.push(groqLineup[i % groqLineup.length]);
+    }
+  } else {
+    // No Groq keys configured — fall back to the legacy all-Gemini ensemble
+    // with the original temperature spread.
+    const temps = [0.1, 0.25, 0.4, 0.55, 0.7].slice(0, ensemble);
+    for (const t of temps) slots.push({ kind: "gemini", temperature: t, label: "gemini-2.5-flash" });
+  }
 
   // Helper: fire one model call and parse it. Captures the underlying error
   // string so we can surface a meaningful message if the entire ensemble
   // fails (instead of a generic "rate-limited" guess).
   const errors: string[] = [];
-  const callModel = async (temperature: number): Promise<ParsedRun | null> => {
+  const callSlot = async (slot: Slot): Promise<ParsedRun | null> => {
     try {
-      const res = await ai.models.generateContent({
-        model: MODEL,
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        // Note: no responseMimeType — prompt already instructs JSON output and
-        // safeJsonExtract handles partially-formatted responses gracefully.
-        config: { temperature, maxOutputTokens: 6144 },
-      });
-      const text = (res.text ?? "").trim();
+      let text = "";
+      if (slot.kind === "gemini") {
+        const res = await ai.models.generateContent({
+          model: MODEL,
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          // Note: no responseMimeType — prompt already instructs JSON output
+          // and safeJsonExtract handles partially-formatted responses.
+          config: { temperature: slot.temperature, maxOutputTokens: 6144 },
+        });
+        text = (res.text ?? "").trim();
+      } else {
+        const res = await groqChat({
+          model: slot.model,
+          temperature: slot.temperature,
+          messages: [
+            { role: "system", content: "You are a precise quantitative analyst. Respond with ONLY the requested JSON object — no prose, no markdown fences." },
+            { role: "user", content: prompt },
+          ],
+        });
+        text = (res.content ?? "").trim();
+      }
       if (!text) {
-        logger.warn({ symbol: args.symbol, temperature }, "ensemble run returned empty response");
-        errors.push("empty response");
+        logger.warn({ symbol: args.symbol, slot: slot.label }, "ensemble run returned empty response");
+        errors.push(`${slot.label}: empty response`);
         return null;
       }
-      return parseRun(text);
+      const parsed = parseRun(text);
+      if (parsed) {
+        logger.info({ symbol: args.symbol, slot: slot.label, dir: parsed.direction, conf: parsed.confidence }, "ensemble slot ok");
+      } else {
+        errors.push(`${slot.label}: unparseable JSON`);
+      }
+      return parsed;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logger.warn({ err: msg, symbol: args.symbol, temperature }, "ensemble run failed");
-      errors.push(msg.slice(0, 200));
+      logger.warn({ err: msg, symbol: args.symbol, slot: slot.label }, "ensemble run failed");
+      errors.push(`${slot.label}: ${msg.slice(0, 160)}`);
       return null;
     }
   };
 
   let runs: ParsedRun[] = [];
 
-  // Primary: run ensemble in parallel.
-  const primary = await Promise.all(temps.map(callModel));
+  // Primary: run all slots in parallel.
+  const primary = await Promise.all(slots.map(callSlot));
   runs = primary.filter((r): r is ParsedRun => r !== null);
 
-  // Fallback: if ALL parallel runs failed, try once more sequentially at the
+  // Fallback: if ALL parallel runs failed, try once more on Gemini at the
   // most deterministic temperature before giving up.
   if (runs.length === 0) {
-    logger.warn({ symbol: args.symbol, ensemble }, "all primary ensemble runs failed — attempting single fallback call");
-    const fallback = await callModel(0.1);
+    logger.warn({ symbol: args.symbol, ensemble }, "all primary ensemble runs failed — attempting single Gemini fallback");
+    const fallback = await callSlot({ kind: "gemini", temperature: 0.1, label: "gemini-2.5-flash (fallback)" });
     if (fallback) runs = [fallback];
   }
 

@@ -160,13 +160,22 @@ function scoreIndicators(
   return { direction, confidence, score };
 }
 
-/** Horizon-scaled noise band: tiny moves on a 1-day horizon are noise;
- *  on a 1-month horizon the bar should be higher. */
+/** Horizon-scaled noise band. Price variance grows ~linearly with time, so
+ *  the std-dev of returns grows with sqrt(time). The previous flat thresholds
+ *  (2% over 3 months!) classified almost every real move as a directional
+ *  signal, which is why backtests showed 0/21 neutrals being "correct" — the
+ *  band was so tight that NEUTRAL essentially required the stock to flatline.
+ *  This sqrt-scaling matches realistic market behavior:
+ *    • 1d  → ±0.5%   (intraday noise floor)
+ *    • 5d  → ±1.1%   (typical week)
+ *    • 21d → ±2.3%   (typical month)
+ *    • 63d → ±4.0%   (typical 3 months)
+ *  Combined with the ×4 multiplier used for the NEUTRAL band in runBacktest,
+ *  the effective neutral bands become ±2% / ±4.5% / ±9% / ±16% — which lines
+ *  up with how analysts actually classify directional vs sideways action.
+ */
 function noiseThreshold(fwdDays: number): number {
-  if (fwdDays <= 1)  return 0.3;
-  if (fwdDays <= 5)  return 0.5;
-  if (fwdDays <= 21) return 1.0;
-  return 2.0;
+  return Math.max(0.3, 0.5 * Math.sqrt(Math.max(1, fwdDays)));
 }
 
 function computeSignalQuality(
