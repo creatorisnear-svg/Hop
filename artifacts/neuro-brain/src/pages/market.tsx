@@ -509,6 +509,14 @@ const HORIZON_MS: Record<string, number> = {
   "3m": 90 * 24 * 3600_000,
 };
 
+const RANGE_PRESETS: Record<string, { interval: string; range: string; label: string }> = {
+  "1D": { interval: "1m",  range: "1d",  label: "1D" },
+  "5D": { interval: "15m", range: "5d",  label: "5D" },
+  "1M": { interval: "1h",  range: "1mo", label: "1M" },
+  "6M": { interval: "1d",  range: "6mo", label: "6M" },
+  "1Y": { interval: "1d",  range: "1y",  label: "1Y" },
+};
+
 function LivePriceChart({
   watch,
   prediction,
@@ -516,17 +524,21 @@ function LivePriceChart({
   watch: Watch;
   prediction: Prediction | null;
 }) {
+  const [rangeKey, setRangeKey] = useState<keyof typeof RANGE_PRESETS>("1D");
   const [series, setSeries] = useState<CandleSeries | null>(null);
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [livePoints, setLivePoints] = useState<{ t: number; c: number }[]>([]);
   const [tickAt, setTickAt] = useState<number>(0);
 
-  // Fetch base intraday candles every 30s.
+  // Fetch base candles for the chosen range every 30s.
   useEffect(() => {
     let cancelled = false;
+    const preset = RANGE_PRESETS[rangeKey];
     const load = async () => {
       try {
-        const r = await fetch(`/api/market/candles/${encodeURIComponent(watch.symbol)}?interval=5m&range=1d`);
+        const r = await fetch(
+          `/api/market/candles/${encodeURIComponent(watch.symbol)}?interval=${preset.interval}&range=${preset.range}`,
+        );
         if (!r.ok) return;
         const data = await r.json();
         if (!cancelled) {
@@ -538,9 +550,9 @@ function LivePriceChart({
     void load();
     const id = setInterval(load, 30_000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [watch.symbol]);
+  }, [watch.symbol, rangeKey]);
 
-  // Poll the live quote every second and append to the live tail.
+  // Poll the live quote every second.
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
@@ -555,7 +567,6 @@ function LivePriceChart({
           setTickAt(now);
           setLivePoints((prev) => {
             const next = [...prev, { t: now, c: p }];
-            // keep last 5 minutes of 1-second ticks
             const cutoff = now - 5 * 60_000;
             return next.filter((pt) => pt.t >= cutoff);
           });
@@ -567,65 +578,100 @@ function LivePriceChart({
     return () => { cancelled = true; clearInterval(id); };
   }, [watch.symbol]);
 
-  const allPoints = useMemo(() => {
+  // Only mix the 1-second live ticks in when looking at the intraday range — on
+  // a 1-month chart a 1-second tick is meaningless and would distort scaling.
+  const histPoints = useMemo(() => {
     const base = series?.candles ?? [];
-    const lastBaseT = base.length ? base[base.length - 1].t : 0;
-    const tail = livePoints.filter((p) => p.t > lastBaseT);
+    if (rangeKey !== "1D") return base;
+    if (!base.length) return livePoints;
+    const lastT = base[base.length - 1].t;
+    const tail = livePoints.filter((p) => p.t > lastT);
     return [...base, ...tail];
-  }, [series, livePoints]);
+  }, [series, livePoints, rangeKey]);
 
   const horizon = prediction?.horizon ?? "1w";
   const projectionMs = HORIZON_MS[horizon] ?? HORIZON_MS["1w"];
 
-  const dims = { w: 760, h: 280, padL: 50, padR: 16, padT: 12, padB: 28 };
+  // Layout: 760×280 viewBox. If we have a prediction, split into a 70% history
+  // panel and a 30% forecast panel — each with its OWN y-scale so today's tiny
+  // moves don't get squashed by a far-away forecast target.
+  const dims = useMemo(() => {
+    const w = 760, h = 280, padL = 50, padR = 18, padT = 12, padB = 28;
+    const inner = w - padL - padR;
+    const hasForecast = prediction?.targetPrice != null;
+    const splitX = hasForecast ? padL + inner * 0.7 : w - padR;
+    return { w, h, padL, padR, padT, padB, hasForecast, splitX };
+  }, [prediction]);
 
-  const view = useMemo(() => {
-    if (allPoints.length === 0) return null;
-    const lastPoint = allPoints[allPoints.length - 1];
-    const tMin = allPoints[0].t;
-    const tMaxLive = lastPoint.t;
-    // Stretch the X axis to also fit the projected end-point.
-    const tMax = prediction?.targetPrice ? tMaxLive + projectionMs : tMaxLive;
+  const histView = useMemo(() => {
+    if (histPoints.length === 0) return null;
+    const tMin = histPoints[0].t;
+    const tMax = histPoints[histPoints.length - 1].t;
 
     let pMin = Number.POSITIVE_INFINITY;
     let pMax = Number.NEGATIVE_INFINITY;
-    for (const p of allPoints) {
+    for (const p of histPoints) {
       if (p.c < pMin) pMin = p.c;
       if (p.c > pMax) pMax = p.c;
     }
-    if (prediction?.targetPrice) {
-      pMin = Math.min(pMin, prediction.targetPrice);
-      pMax = Math.max(pMax, prediction.targetPrice);
-    }
-    if (series?.previousClose) {
+    // For the intraday view, anchor the y-range to previous close so daily
+    // change is readable. (Skip on multi-day ranges to avoid stretching.)
+    if (rangeKey === "1D" && series?.previousClose) {
       pMin = Math.min(pMin, series.previousClose);
       pMax = Math.max(pMax, series.previousClose);
     }
     if (pMin === pMax) { pMin -= 1; pMax += 1; }
-    const pad = (pMax - pMin) * 0.08;
+    const pad = (pMax - pMin) * 0.1;
     pMin -= pad; pMax += pad;
 
-    const xOf = (t: number) => dims.padL + ((t - tMin) / Math.max(tMax - tMin, 1)) * (dims.w - dims.padL - dims.padR);
-    const yOf = (c: number) => dims.padT + (1 - (c - pMin) / Math.max(pMax - pMin, 0.0001)) * (dims.h - dims.padT - dims.padB);
+    const x0 = dims.padL;
+    const x1 = dims.splitX;
+    const y0 = dims.padT;
+    const y1 = dims.h - dims.padB;
+    const xOf = (t: number) => x0 + ((t - tMin) / Math.max(tMax - tMin, 1)) * (x1 - x0);
+    const yOf = (c: number) => y0 + (1 - (c - pMin) / Math.max(pMax - pMin, 1e-9)) * (y1 - y0);
+    const path = histPoints.map((p, i) => `${i === 0 ? "M" : "L"}${xOf(p.t).toFixed(2)} ${yOf(p.c).toFixed(2)}`).join(" ");
+    const lastPoint = histPoints[histPoints.length - 1];
+    return { xOf, yOf, path, pMin, pMax, tMin, tMax, lastPoint, x0, x1, y0, y1 };
+  }, [histPoints, rangeKey, series, dims]);
 
-    const path = allPoints.map((p, i) => `${i === 0 ? "M" : "L"} ${xOf(p.t).toFixed(2)} ${yOf(p.c).toFixed(2)}`).join(" ");
+  const fcastView = useMemo(() => {
+    if (!dims.hasForecast || !histView || !prediction?.targetPrice) return null;
+    const start = histView.lastPoint.c;
+    const target = prediction.targetPrice;
+    const lo = Math.min(start, target);
+    const hi = Math.max(start, target);
+    const span = Math.max(hi - lo, Math.abs(start) * 0.005);
+    const pad = span * 0.4;
+    const pMin = lo - pad;
+    const pMax = hi + pad;
 
-    let projection: { x1: number; y1: number; x2: number; y2: number; color: string } | null = null;
-    if (prediction?.targetPrice) {
-      const x1 = xOf(lastPoint.t);
-      const y1 = yOf(lastPoint.c);
-      const x2 = xOf(tMaxLive + projectionMs);
-      const y2 = yOf(prediction.targetPrice);
-      const color = prediction.direction === "BULLISH" ? "#22c55e" : prediction.direction === "BEARISH" ? "#ef4444" : "#fbbf24";
-      projection = { x1, y1, x2, y2, color };
-    }
+    const x0 = dims.splitX;
+    const x1 = dims.w - dims.padR;
+    const y0 = dims.padT;
+    const y1 = dims.h - dims.padB;
+    const tStart = histView.lastPoint.t;
+    const tEnd = tStart + projectionMs;
+    const xOf = (t: number) => x0 + ((t - tStart) / Math.max(tEnd - tStart, 1)) * (x1 - x0);
+    const yOf = (c: number) => y0 + (1 - (c - pMin) / Math.max(pMax - pMin, 1e-9)) * (y1 - y0);
 
-    const prevCloseY = series?.previousClose ? yOf(series.previousClose) : null;
-
-    return { xOf, yOf, path, projection, lastPoint, pMin, pMax, prevCloseY, tMin, tMax, tMaxLive };
-  }, [allPoints, prediction, projectionMs, series]);
+    const color = prediction.direction === "BULLISH" ? "#22c55e"
+      : prediction.direction === "BEARISH" ? "#ef4444"
+      : "#fbbf24";
+    return {
+      xOf, yOf, pMin, pMax, color, tStart, tEnd, target,
+      startY: yOf(start), endY: yOf(target),
+      startX: x0, endX: x1, y0, y1,
+    };
+  }, [dims, histView, prediction, projectionMs]);
 
   const fmtPrice = (v: number) => v.toLocaleString(undefined, { maximumFractionDigits: v >= 100 ? 2 : 4 });
+  const fmtTime = (ts: number) => {
+    const d = new Date(ts);
+    if (rangeKey === "1D") return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    if (rangeKey === "5D") return d.toLocaleString([], { weekday: "short", hour: "2-digit" });
+    return d.toLocaleDateString([], { month: "short", day: "numeric" });
+  };
   const currency = series?.currency ?? prediction?.quote?.currency ?? "";
   const change = livePrice != null && series?.previousClose
     ? ((livePrice - series.previousClose) / series.previousClose) * 100
@@ -641,8 +687,9 @@ function LivePriceChart({
               <Activity className="w-4 h-4 text-primary animate-pulse" />
               Live chart · {watch.symbol}
             </CardTitle>
-            <CardDescription className="flex items-center gap-2 mt-0.5">
-              <span>5-min candles + 1s live ticks · projection out to {horizon}</span>
+            <CardDescription className="flex items-center gap-2 mt-0.5 flex-wrap">
+              <span>{rangeKey === "1D" ? "1-min candles + 1s live ticks" : `${RANGE_PRESETS[rangeKey].interval} candles · ${RANGE_PRESETS[rangeKey].range}`}</span>
+              {prediction?.targetPrice && <span>· forecast to {horizon}</span>}
               {series?.marketState && (
                 <Badge variant="outline" className="text-[10px] uppercase">{series.marketState}</Badge>
               )}
@@ -659,71 +706,112 @@ function LivePriceChart({
             </div>
           </div>
         </div>
+        <div className="flex gap-1 pt-1">
+          {Object.keys(RANGE_PRESETS).map((k) => (
+            <Button
+              key={k}
+              size="sm"
+              variant={rangeKey === k ? "default" : "outline"}
+              className="h-6 px-2 text-[11px]"
+              onClick={() => setRangeKey(k as keyof typeof RANGE_PRESETS)}
+            >{k}</Button>
+          ))}
+        </div>
       </CardHeader>
       <CardContent>
-        {!view ? (
+        {!histView ? (
           <div className="h-[280px] flex items-center justify-center text-sm text-muted-foreground">
             Loading market data…
           </div>
         ) : (
-          <svg viewBox={`0 0 ${dims.w} ${dims.h}`} className="w-full h-[280px]" preserveAspectRatio="none">
+          <svg viewBox={`0 0 ${dims.w} ${dims.h}`} className="w-full h-[280px]">
+            {/* HISTORY PANEL */}
             {/* horizontal grid */}
             {[0.25, 0.5, 0.75].map((f) => {
-              const y = dims.padT + f * (dims.h - dims.padT - dims.padB);
-              return (
-                <line key={f} x1={dims.padL} x2={dims.w - dims.padR} y1={y} y2={y}
-                  stroke="hsl(var(--border))" strokeWidth={0.5} strokeDasharray="2 4" />
-              );
+              const y = histView.y0 + f * (histView.y1 - histView.y0);
+              return <line key={`hg${f}`} x1={histView.x0} x2={histView.x1} y1={y} y2={y}
+                stroke="hsl(var(--border))" strokeWidth={0.5} strokeDasharray="2 4" />;
             })}
-            {/* y axis labels */}
+            {/* y labels (history) */}
             {[0, 0.5, 1].map((f) => {
-              const y = dims.padT + f * (dims.h - dims.padT - dims.padB);
-              const v = view.pMax - f * (view.pMax - view.pMin);
-              return (
-                <text key={f} x={dims.padL - 6} y={y + 3} textAnchor="end" fontSize="10"
-                  fill="hsl(var(--muted-foreground))" fontFamily="monospace">{fmtPrice(v)}</text>
-              );
+              const y = histView.y0 + f * (histView.y1 - histView.y0);
+              const v = histView.pMax - f * (histView.pMax - histView.pMin);
+              return <text key={`hy${f}`} x={histView.x0 - 6} y={y + 3} textAnchor="end" fontSize="10"
+                fill="hsl(var(--muted-foreground))" fontFamily="monospace">{fmtPrice(v)}</text>;
             })}
-            {/* previous close reference */}
-            {view.prevCloseY != null && (
+            {/* x labels (history) */}
+            {[0, 0.5, 1].map((f) => {
+              const x = histView.x0 + f * (histView.x1 - histView.x0);
+              const t = histView.tMin + f * (histView.tMax - histView.tMin);
+              return <text key={`hx${f}`} x={x} y={dims.h - 8} textAnchor={f === 0 ? "start" : f === 1 ? "end" : "middle"}
+                fontSize="10" fill="hsl(var(--muted-foreground))" fontFamily="monospace">{fmtTime(t)}</text>;
+            })}
+            {/* prev close reference (intraday only) */}
+            {rangeKey === "1D" && series?.previousClose && (
               <>
-                <line x1={dims.padL} x2={dims.w - dims.padR} y1={view.prevCloseY} y2={view.prevCloseY}
-                  stroke="hsl(var(--muted-foreground))" strokeWidth={0.7} strokeDasharray="3 3" opacity={0.6} />
-                <text x={dims.w - dims.padR - 4} y={view.prevCloseY - 3} textAnchor="end" fontSize="9"
-                  fill="hsl(var(--muted-foreground))">prev close</text>
+                <line
+                  x1={histView.x0}
+                  x2={histView.x1}
+                  y1={histView.yOf(series.previousClose)}
+                  y2={histView.yOf(series.previousClose)}
+                  stroke="hsl(var(--muted-foreground))" strokeWidth={0.7} strokeDasharray="3 3" opacity={0.6}
+                />
+                <text x={histView.x1 - 4} y={histView.yOf(series.previousClose) - 3}
+                  textAnchor="end" fontSize="9" fill="hsl(var(--muted-foreground))">prev close</text>
               </>
             )}
-            {/* divider where "now" is */}
-            {view.projection && (
-              <line x1={view.projection.x1} x2={view.projection.x1} y1={dims.padT} y2={dims.h - dims.padB}
-                stroke="hsl(var(--muted-foreground))" strokeDasharray="2 3" opacity={0.5} />
-            )}
-            {/* historical price line */}
-            <path d={view.path} fill="none" stroke="hsl(var(--primary))" strokeWidth={1.6} />
-            {/* projection line */}
-            {view.projection && (
+            {/* historical line + soft fill */}
+            <path d={`${histView.path} L${histView.x1.toFixed(2)} ${histView.y1.toFixed(2)} L${histView.x0.toFixed(2)} ${histView.y1.toFixed(2)} Z`}
+              fill="hsl(var(--primary))" opacity={0.08} />
+            <path d={histView.path} fill="none" stroke="hsl(var(--primary))" strokeWidth={1.8} />
+            {/* live dot */}
+            {livePrice != null && (
               <>
-                <line x1={view.projection.x1} y1={view.projection.y1}
-                  x2={view.projection.x2} y2={view.projection.y2}
-                  stroke={view.projection.color} strokeWidth={2} strokeDasharray="6 4" />
-                <circle cx={view.projection.x2} cy={view.projection.y2} r={4}
-                  fill={view.projection.color} />
-                <text x={view.projection.x2 - 4} y={view.projection.y2 - 8} textAnchor="end"
-                  fontSize="10" fill={view.projection.color} fontFamily="monospace">
-                  target {prediction?.targetPrice ? fmtPrice(prediction.targetPrice) : ""}
-                </text>
-              </>
-            )}
-            {/* current live dot */}
-            {livePrice != null && view && (
-              <>
-                <circle cx={view.xOf(view.lastPoint.t)} cy={view.yOf(view.lastPoint.c)} r={4}
+                <circle cx={histView.xOf(histView.lastPoint.t)} cy={histView.yOf(histView.lastPoint.c)} r={4}
                   fill="hsl(var(--primary))" />
-                <circle cx={view.xOf(view.lastPoint.t)} cy={view.yOf(view.lastPoint.c)} r={8}
+                <circle cx={histView.xOf(histView.lastPoint.t)} cy={histView.yOf(histView.lastPoint.c)} r={8}
                   fill="hsl(var(--primary))" opacity={0.25}>
                   <animate attributeName="r" values="4;10;4" dur="1.4s" repeatCount="indefinite" />
                   <animate attributeName="opacity" values="0.4;0;0.4" dur="1.4s" repeatCount="indefinite" />
                 </circle>
+              </>
+            )}
+
+            {/* DIVIDER + FORECAST PANEL */}
+            {fcastView && (
+              <>
+                <line x1={dims.splitX} x2={dims.splitX} y1={dims.padT} y2={dims.h - dims.padB}
+                  stroke="hsl(var(--muted-foreground))" strokeDasharray="2 3" opacity={0.6} />
+                <text x={dims.splitX + 4} y={dims.padT + 10} fontSize="9" fill="hsl(var(--muted-foreground))">now</text>
+                {/* forecast grid */}
+                {[0.25, 0.5, 0.75].map((f) => {
+                  const y = fcastView.y0 + f * (fcastView.y1 - fcastView.y0);
+                  return <line key={`fg${f}`} x1={fcastView.startX} x2={fcastView.endX} y1={y} y2={y}
+                    stroke="hsl(var(--border))" strokeWidth={0.5} strokeDasharray="2 4" />;
+                })}
+                {/* forecast y-labels (right side) */}
+                {[0, 1].map((f) => {
+                  const y = fcastView.y0 + f * (fcastView.y1 - fcastView.y0);
+                  const v = fcastView.pMax - f * (fcastView.pMax - fcastView.pMin);
+                  return <text key={`fy${f}`} x={fcastView.endX + 2} y={y + 3} textAnchor="start"
+                    fontSize="9" fill="hsl(var(--muted-foreground))" fontFamily="monospace">{fmtPrice(v)}</text>;
+                })}
+                {/* x label at forecast end */}
+                <text x={fcastView.endX} y={dims.h - 8} textAnchor="end" fontSize="10"
+                  fill={fcastView.color} fontFamily="monospace">{horizon}</text>
+                {/* projection line */}
+                <line x1={fcastView.startX} y1={fcastView.startY}
+                  x2={fcastView.endX} y2={fcastView.endY}
+                  stroke={fcastView.color} strokeWidth={2.2} strokeDasharray="6 4" />
+                {/* projection envelope */}
+                <path d={`M${fcastView.startX} ${fcastView.startY} L${fcastView.endX} ${fcastView.endY} L${fcastView.endX} ${fcastView.y1} L${fcastView.startX} ${fcastView.y1} Z`}
+                  fill={fcastView.color} opacity={0.06} />
+                {/* target dot + label */}
+                <circle cx={fcastView.endX} cy={fcastView.endY} r={4} fill={fcastView.color} />
+                <text x={fcastView.endX - 4} y={fcastView.endY - 8} textAnchor="end"
+                  fontSize="10" fill={fcastView.color} fontFamily="monospace">
+                  target {prediction?.targetPrice ? fmtPrice(prediction.targetPrice) : ""}
+                </text>
               </>
             )}
           </svg>
