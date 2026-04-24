@@ -15,6 +15,7 @@ import imagesRouter from "./images";
 import keysRouter from "./keys";
 import jarvisActionsRouter from "./jarvisActions";
 import jarvisVoiceRouter from "./jarvisVoice";
+import marketRouter from "./market";
 
 const router: IRouter = Router();
 
@@ -34,5 +35,6 @@ router.use(imagesRouter);
 router.use(keysRouter);
 router.use(jarvisActionsRouter);
 router.use(jarvisVoiceRouter);
+router.use(marketRouter);
 
 export default router;

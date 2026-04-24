@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Link, useLocation } from "wouter";
 import {
   Activity, Brain, Play, LayoutDashboard, Settings, Zap, Wrench, Moon, Sparkles,
-  Webhook, Puzzle, Image as ImageIcon, Key, ShieldAlert, Menu, X, Bot,
+  Webhook, Puzzle, Image as ImageIcon, Key, ShieldAlert, Menu, X, Bot, LineChart,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
@@ -25,6 +25,7 @@ const NAV = [
   { href: "/webhooks", label: "Webhooks", icon: Webhook },
   { href: "/plugins", label: "Plugins", icon: Puzzle },
   { href: "/images", label: "Imagery", icon: ImageIcon },
+  { href: "/market", label: "Market Predictor", icon: LineChart },
   { href: "/memory", label: "Jarvis Memory", icon: Brain },
   { href: "/keys", label: "API Keys", icon: Key },
   { href: "/jarvis-actions", label: "Jarvis Actions", icon: ShieldAlert },

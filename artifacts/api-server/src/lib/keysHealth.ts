@@ -1,12 +1,29 @@
 import { logger } from "./logger";
 
+export type KeyState = "ready" | "rate_limited" | "invalid" | "unreachable" | "missing";
+
 export interface KeyHealth {
   name: string;
   provider: "groq" | "gemini";
   ok: boolean;
+  state: KeyState;
   status?: number;
   error?: string;
   checkedAt: string;
+}
+
+function classifyHttp(status: number, errBody?: string): { state: KeyState; ok: boolean } {
+  if (status === 200 || (status >= 200 && status < 300)) {
+    return { state: "ready", ok: true };
+  }
+  if (status === 429) return { state: "rate_limited", ok: false };
+  if (status === 401 || status === 403) return { state: "invalid", ok: false };
+  if (status === 0) return { state: "unreachable", ok: false };
+  // Some Gemini quota errors come back as 400 with RESOURCE_EXHAUSTED
+  if (status === 400 && errBody && /RESOURCE_EXHAUSTED|quota/i.test(errBody)) {
+    return { state: "rate_limited", ok: false };
+  }
+  return { state: "unreachable", ok: false };
 }
 
 let cache: KeyHealth[] = [];
@@ -30,12 +47,16 @@ async function checkGroq(name: string, key: string): Promise<KeyHealth> {
       headers: { authorization: `Bearer ${key}` },
       signal: ctrl.signal,
     });
+    let body: string | undefined;
+    if (!res.ok) body = (await res.text().catch(() => "")).slice(0, 300);
+    const { state, ok } = classifyHttp(res.status, body);
     return {
       name,
       provider: "groq",
-      ok: res.ok,
+      ok,
+      state,
       status: res.status,
-      error: res.ok ? undefined : `HTTP ${res.status}`,
+      error: ok ? undefined : `HTTP ${res.status}${body ? `: ${body.slice(0, 120)}` : ""}`,
       checkedAt: new Date().toISOString(),
     };
   } catch (err) {
@@ -43,6 +64,7 @@ async function checkGroq(name: string, key: string): Promise<KeyHealth> {
       name,
       provider: "groq",
       ok: false,
+      state: "unreachable",
       error: err instanceof Error ? err.message : String(err),
       checkedAt: new Date().toISOString(),
     };
@@ -71,12 +93,16 @@ async function checkGeminiDirect(name: string, key: string): Promise<KeyHealth> 
       `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`,
       { signal: ctrl.signal },
     );
+    let body: string | undefined;
+    if (!res.ok) body = (await res.text().catch(() => "")).slice(0, 400);
+    const { state, ok } = classifyHttp(res.status, body);
     return {
       name,
       provider: "gemini",
-      ok: res.ok,
+      ok,
+      state,
       status: res.status,
-      error: res.ok ? undefined : `HTTP ${res.status}`,
+      error: ok ? undefined : `HTTP ${res.status}${body ? `: ${body.slice(0, 140)}` : ""}`,
       checkedAt: new Date().toISOString(),
     };
   } catch (err) {
@@ -84,6 +110,7 @@ async function checkGeminiDirect(name: string, key: string): Promise<KeyHealth> 
       name,
       provider: "gemini",
       ok: false,
+      state: "unreachable",
       error: err instanceof Error ? err.message : String(err),
       checkedAt: new Date().toISOString(),
     };
@@ -101,32 +128,37 @@ async function checkGeminiReplit(): Promise<KeyHealth> {
       name,
       provider: "gemini",
       ok: false,
+      state: "missing",
       error: "Gemini env vars missing",
       checkedAt: new Date().toISOString(),
     };
   }
   try {
     const { ai } = await import("@workspace/integrations-gemini-ai");
-    const resp = await ai.models.generateContent({
+    await ai.models.generateContent({
       model: "gemini-2.5-flash",
       contents: [{ role: "user", parts: [{ text: "ping" }] }],
       config: { maxOutputTokens: 8, temperature: 0 },
     });
-    const ok = typeof resp.text === "string" && resp.text.length >= 0;
+    // If we got here without throwing, the key is reachable and not rate-limited.
     return {
       name,
       provider: "gemini",
-      ok,
+      ok: true,
+      state: "ready",
       status: 200,
-      error: ok ? undefined : "no response",
       checkedAt: new Date().toISOString(),
     };
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const isLimit = /\b(429|quota|rate.?limit|RESOURCE_EXHAUSTED)\b/i.test(msg);
+    const isInvalid = /\b(401|403|API.?key|UNAUTHENTICATED|PERMISSION_DENIED)\b/i.test(msg);
     return {
       name,
       provider: "gemini",
       ok: false,
-      error: err instanceof Error ? err.message : String(err),
+      state: isLimit ? "rate_limited" : isInvalid ? "invalid" : "unreachable",
+      error: msg,
       checkedAt: new Date().toISOString(),
     };
   }

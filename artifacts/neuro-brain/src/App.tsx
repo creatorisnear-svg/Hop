@@ -22,6 +22,7 @@ import KeysPage from "@/pages/keys";
 import JarvisActionsPage from "@/pages/jarvis-actions";
 import JarvisPage from "@/pages/jarvis";
 import BrainTopologyPage from "@/pages/brain";
+import MarketPage from "@/pages/market";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -51,6 +52,7 @@ function Router() {
       <Route path="/jarvis-actions" component={JarvisActionsPage} />
       <Route path="/jarvis" component={JarvisPage} />
       <Route path="/brain" component={BrainTopologyPage} />
+      <Route path="/market" component={MarketPage} />
       <Route component={NotFound} />
     </Switch>
   );
