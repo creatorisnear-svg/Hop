@@ -418,12 +418,18 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
       mat: THREE.LineBasicMaterial;
       baseColor: THREE.Color;
       hotColor: THREE.Color;
+      bornAt: number;       // performance.now() when added — drives birth flash
+      announced: boolean;   // becomes true after the birth pulse-burst is spawned
     };
     const lineGroup = new THREE.Group();
     const edgeRefs: EdgeRef[] = [];
     const seenEdges = new Set<string>();
     const baseEdgeColor = new THREE.Color(0x335577);
     const hotEdgeColor = new THREE.Color(0xffb347);
+
+    // Track first-mount so we don't fire a "newly born" flash for the
+    // initial set of edges — only edges that appear later count as new.
+    let initialMount = true;
 
     function addEdge(a: string, b: string) {
       const la = REGION_LAYOUT[a];
@@ -439,7 +445,8 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
       const mat = new THREE.LineBasicMaterial({
         color: baseEdgeColor.clone(),
         transparent: true,
-        opacity: 0.22,
+        // Edges born after the initial mount start invisible and fade in.
+        opacity: initialMount ? 0.22 : 0.0,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
       });
@@ -450,6 +457,8 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
         mat,
         baseColor: baseEdgeColor,
         hotColor: hotEdgeColor,
+        bornAt: initialMount ? -Infinity : performance.now(),
+        announced: initialMount,
       });
     }
     for (const [a, b] of CONNECTIONS) addEdge(a, b);
@@ -458,6 +467,8 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
       if (a && b) addEdge(a, b);
     }
     scene.add(lineGroup);
+    // Anything added from now on is a real, freshly-learned synapse.
+    initialMount = false;
 
     // Expose addEdge so the synapses effect can inject newly-learned pairs
     // into the live scene without a remount.
@@ -584,15 +595,44 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
         r.wire.rotateOnAxis(r.spinAxis, -spin * 1.4 * dt);
       }
 
-      // Animate edge brightness from learned synapse strength.
+      // Animate edge brightness from learned synapse strength + birth flash.
+      const BIRTH_FLASH_MS = 1600;
       for (const e of edgeRefs) {
         const strength = edgeStrength(e.from, e.to);
         const isActiveEdge = active === e.from || active === e.to;
         const breathe = 0.85 + Math.sin(timeAcc * 2 + e.from.length) * 0.15;
+        const sinceBirth = now - e.bornAt;
+        let birth = 0;
+        if (sinceBirth >= 0 && sinceBirth < BIRTH_FLASH_MS) {
+          birth = 1 - sinceBirth / BIRTH_FLASH_MS; // 1 → 0 over the flash window
+        }
         const targetOpacity =
-          (0.18 + strength * 0.55 + (isActiveEdge ? 0.25 : 0)) * breathe;
-        e.mat.opacity += (targetOpacity - e.mat.opacity) * Math.min(1, dt * 4);
-        e.mat.color.copy(e.baseColor).lerp(e.hotColor, Math.min(1, strength));
+          (0.18 + strength * 0.55 + (isActiveEdge ? 0.25 : 0) + birth * 0.85) *
+          breathe;
+        e.mat.opacity += (targetOpacity - e.mat.opacity) * Math.min(1, dt * 5);
+        // While being born, override toward bright white so it pops, then
+        // settle back into the cool→hot gradient driven by strength.
+        if (birth > 0.01) {
+          const target = new THREE.Color(0xffffff)
+            .lerp(e.hotColor, 1 - birth)
+            .lerp(e.baseColor, (1 - birth) * 0.4);
+          e.mat.color.copy(target);
+        } else {
+          e.mat.color.copy(e.baseColor).lerp(e.hotColor, Math.min(1, strength));
+        }
+
+        // First time we see a brand-new edge in the loop, fire a burst of
+        // signals running back and forth along it so the user sees the
+        // synapse "wire itself up" rather than just appearing.
+        if (!e.announced && sinceBirth >= 0) {
+          e.announced = true;
+          const colorA = REGION_COLORS[e.from] ?? 0xffffff;
+          const colorB = REGION_COLORS[e.to] ?? 0xffffff;
+          for (let i = 0; i < 4; i++) {
+            spawnSignal(e.from, e.to, colorA);
+            spawnSignal(e.to, e.from, colorB);
+          }
+        }
       }
 
       // Spawn signals along the active region's connections.
