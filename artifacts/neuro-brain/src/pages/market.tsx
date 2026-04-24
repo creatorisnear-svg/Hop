@@ -136,6 +136,10 @@ interface Candle {
   h: number;
   l: number;
   c: number;
+  // Optional volume — populated by Yahoo for intraday bars. Used to draw the
+  // VWAP line on the 1D chart (institutional reference price). Older watches
+  // cached without volume will simply skip the VWAP overlay.
+  v?: number;
 }
 
 interface CandleSeries {
@@ -1080,6 +1084,42 @@ function LivePriceChart({
   const horizon = prediction?.horizon ?? "1w";
   const projectionMs = HORIZON_MS[horizon] ?? HORIZON_MS["1w"];
 
+  // Intraday day-trader levels — computed only on the 1D range. These are the
+  // bread-and-butter reference lines a puts/calls scalper watches all day:
+  //   • HOD / LOD — today's session high & low. Breaks of these are the most
+  //     common entry/exit triggers for 0DTE contracts.
+  //   • VWAP     — Volume-Weighted Average Price, the institutional fair-value
+  //     line. Price above VWAP = intraday bullish bias; below = bearish.
+  //     Only drawn when candle volume data is present (older cached series
+  //     may lack it; we degrade gracefully by skipping the line).
+  // For longer ranges (5D, 1M, etc.) these levels are meaningless — VWAP
+  // resets every session and HOD/LOD only matter for today's tape — so we
+  // return null and skip rendering.
+  const intradayLevels = useMemo<{
+    hod: number; lod: number;
+    vwapPath: { t: number; v: number }[] | null;
+  } | null>(() => {
+    if (rangeKey !== "1D" || histCandles.length === 0) return null;
+    let hod = -Infinity, lod = Infinity;
+    let cumPV = 0, cumV = 0;
+    let hasVolume = false;
+    const vwapPath: { t: number; v: number }[] = [];
+    for (const c of histCandles) {
+      if (c.h > hod) hod = c.h;
+      if (c.l < lod) lod = c.l;
+      const vol = c.v ?? 0;
+      if (vol > 0) {
+        hasVolume = true;
+        const typical = (c.h + c.l + c.c) / 3;
+        cumPV += typical * vol;
+        cumV  += vol;
+        vwapPath.push({ t: c.t, v: cumPV / cumV });
+      }
+    }
+    if (!Number.isFinite(hod) || !Number.isFinite(lod)) return null;
+    return { hod, lod, vwapPath: hasVolume ? vwapPath : null };
+  }, [histCandles, rangeKey]);
+
   // SINGLE-PANEL layout: history candles + forecast extension share one x-axis
   // and one y-axis so the prediction is rendered INSIDE the same chart, not
   // off to the side. We bias slightly more vertical room when a forecast is
@@ -1186,6 +1226,12 @@ function LivePriceChart({
       pMin = Math.min(pMin, series.previousClose);
       pMax = Math.max(pMax, series.previousClose);
     }
+    // Pull intraday HOD/LOD into the y-range so the dashed level lines we
+    // draw below are guaranteed to land on-chart even when zoomed.
+    if (intradayLevels && !isZoomed) {
+      pMin = Math.min(pMin, intradayLevels.lod);
+      pMax = Math.max(pMax, intradayLevels.hod);
+    }
     if (livePrice != null && !isZoomed) {
       pMin = Math.min(pMin, livePrice);
       pMax = Math.max(pMax, livePrice);
@@ -1265,7 +1311,7 @@ function LivePriceChart({
       x0, x1, y0, y1, slot, bodyW, lastCandle,
       fcastColor, fcastEnd,
     };
-  }, [histCandles, rangeKey, series, dims, livePrice, livePivot, prediction, projectionMs, isNarrow, zoomWindow]);
+  }, [histCandles, rangeKey, series, dims, livePrice, livePivot, prediction, projectionMs, isNarrow, zoomWindow, intradayLevels]);
 
   // The live projected line: anchored at the *current* live price, sloping to
   // the prediction's target. Re-evaluated every second via `nowMs` so the
@@ -1608,6 +1654,74 @@ function LivePriceChart({
                 <text x={view.histPxEnd - 4} y={view.yOf(series.previousClose) - 3}
                   textAnchor="end" fontSize="9" fill="hsl(var(--muted-foreground))">prev close</text>
               </>
+            )}
+            {/* INTRADAY DAY-TRADER LEVELS (1D range only)
+                HOD / LOD horizontal lines + VWAP traced line. These are the
+                three levels every options scalper has open in another window:
+                  • Break ABOVE HOD = bullish breakout → long calls
+                  • Break BELOW LOD = bearish breakdown → long puts
+                  • Reclaim of VWAP from below = intraday momentum shift
+                We draw them ONLY across the historical portion of the chart
+                (left of the "now" divider) so they don't bleed into the
+                forecast region and confuse the prediction line.
+            */}
+            {intradayLevels && (
+              <g pointerEvents="none">
+                {/* HOD — today's high (red, the resistance to break above) */}
+                <line
+                  x1={view.histPxStart} x2={view.histPxEnd}
+                  y1={view.yOf(intradayLevels.hod)} y2={view.yOf(intradayLevels.hod)}
+                  stroke="#ef4444" strokeWidth={0.9} strokeDasharray="4 3" opacity={0.55}
+                />
+                <text x={view.histPxStart + 4} y={view.yOf(intradayLevels.hod) - 3}
+                  fontSize="9" fontFamily="monospace" fill="#ef4444" opacity={0.85}>
+                  HOD {intradayLevels.hod.toFixed(2)}
+                </text>
+                {/* LOD — today's low (green, the support to break below) */}
+                <line
+                  x1={view.histPxStart} x2={view.histPxEnd}
+                  y1={view.yOf(intradayLevels.lod)} y2={view.yOf(intradayLevels.lod)}
+                  stroke="#22c55e" strokeWidth={0.9} strokeDasharray="4 3" opacity={0.55}
+                />
+                <text x={view.histPxStart + 4} y={view.yOf(intradayLevels.lod) + 10}
+                  fontSize="9" fontFamily="monospace" fill="#22c55e" opacity={0.85}>
+                  LOD {intradayLevels.lod.toFixed(2)}
+                </text>
+                {/* VWAP traced line — only when volume data is present */}
+                {intradayLevels.vwapPath && intradayLevels.vwapPath.length > 1 && (() => {
+                  const pts = intradayLevels.vwapPath
+                    .filter((p) => {
+                      const x = view.xOf(p.t);
+                      return x >= view.x0 - 4 && x <= view.histPxEnd + 4;
+                    })
+                    .map((p) => `${view.xOf(p.t).toFixed(1)},${view.yOf(p.v).toFixed(1)}`)
+                    .join(" ");
+                  if (!pts) return null;
+                  const last = intradayLevels.vwapPath[intradayLevels.vwapPath.length - 1];
+                  return (
+                    <>
+                      <polyline
+                        points={pts}
+                        fill="none"
+                        stroke="#06b6d4"
+                        strokeWidth={1.4}
+                        strokeOpacity={0.85}
+                        strokeLinejoin="round"
+                      />
+                      <text
+                        x={view.xOf(last.t) + 4}
+                        y={view.yOf(last.v) + 3}
+                        fontSize="9"
+                        fontFamily="monospace"
+                        fill="#06b6d4"
+                        opacity={0.95}
+                      >
+                        VWAP {last.v.toFixed(2)}
+                      </text>
+                    </>
+                  );
+                })()}
+              </g>
             )}
             {/* OHLC candles — wick = high/low, body = open/close.
                 When zoomed, candles outside the visible window are skipped so
@@ -2312,7 +2426,7 @@ function PredictionCard({
             <TradeIcon className="w-5 h-5" /> {trade.label}
           </div>
           <div className="text-xs opacity-90 mt-0.5">{trade.blurb}</div>
-          {(prediction.strikeHint || prediction.expiryHint || prediction.entryTrigger || prediction.riskNote) && (
+          {(prediction.strikeHint || prediction.expiryHint || prediction.entryTrigger || prediction.riskNote || prediction.targetPrice != null) && (
             <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-xs text-foreground">
               {prediction.strikeHint && (
                 <div><span className="font-semibold opacity-80">Strike:</span> {prediction.strikeHint}</div>
@@ -2320,6 +2434,28 @@ function PredictionCard({
               {prediction.expiryHint && (
                 <div><span className="font-semibold opacity-80">Expiry:</span> {prediction.expiryHint}</div>
               )}
+              {prediction.targetPrice != null && (() => {
+                // Show the projected target price + expected % move from the
+                // entry quote so the trader can size strikes intelligently.
+                // The colored arrow makes the direction unmissable on mobile.
+                const entry = prediction.quote?.price ?? null;
+                const movePct = entry != null && entry > 0
+                  ? ((prediction.targetPrice - entry) / entry) * 100
+                  : null;
+                const arrow = movePct == null ? "" : (movePct >= 0 ? "▲" : "▼");
+                const moveColor = movePct == null ? "" : (movePct >= 0 ? "text-emerald-400" : "text-red-400");
+                return (
+                  <div>
+                    <span className="font-semibold opacity-80">Target:</span>{" "}
+                    <span className="font-mono">${prediction.targetPrice.toFixed(2)}</span>
+                    {movePct != null && (
+                      <span className={`ml-1.5 font-mono ${moveColor}`}>
+                        {arrow} {movePct >= 0 ? "+" : ""}{movePct.toFixed(2)}%
+                      </span>
+                    )}
+                  </div>
+                );
+              })()}
               {prediction.entryTrigger && (
                 <div className="sm:col-span-2"><span className="font-semibold opacity-80">Enter when:</span> {prediction.entryTrigger}</div>
               )}
