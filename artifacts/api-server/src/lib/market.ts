@@ -41,6 +41,13 @@ export interface IndicatorsResult {
   volatility20d: number | null;
   // Multi-timeframe trend agreement scoring (-3..+3)
   trendScore: number | null;
+  // SuperTrend (ATR period 10, multiplier 3) — a trend-following overlay
+  // that flips between bullish and bearish modes. Widely used as a regime
+  // filter: only take longs when SuperTrend is bullish, shorts when bearish.
+  superTrend: number | null;                 // current SuperTrend line value
+  superTrendDir: "up" | "down" | null;       // bullish (price > line) vs bearish (price < line)
+  superTrendDistancePct: number | null;      // (price - SuperTrend) / price * 100
+  superTrendFlipBarsAgo: number | null;      // how many bars since the last regime flip (0 = today)
   // Volume signals — driven by daily/intraday candle volumes when available.
   // Relative volume = today's volume / 20d avg volume (so "unusual volume"
   // is anything > ~1.5x). VWAP and price vs VWAP read intraday institutional
@@ -960,6 +967,27 @@ function indicatorsBlock(ind: IndicatorsResult | null): string {
       : ind.trendScore < 0 ? "mild downtrend" : "no trend";
     lines.push(`Multi-timeframe trend score (sma 20/50/200): ${ind.trendScore >= 0 ? "+" : ""}${ind.trendScore} (${tag})`);
   }
+  // SuperTrend (ATR 10, mult 3) — primary regime filter for the model.
+  // The model should treat this as a hard bias: only take longs in an "up"
+  // regime and shorts in a "down" regime, unless an exceptionally strong
+  // setup justifies fighting it. Recent flips (≤2 bars) are highest-quality
+  // signals; stale flips (>20 bars) suggest the regime may be tiring.
+  if (ind.superTrend != null && ind.superTrendDir != null) {
+    const flip = ind.superTrendFlipBarsAgo;
+    const dist = ind.superTrendDistancePct;
+    const flipTag = flip == null ? ""
+      : flip === 0 ? "FLIPPED TODAY — fresh regime change, highest-quality entry"
+      : flip <= 2 ? `flipped ${flip}d ago — fresh regime, strong signal`
+      : flip <= 10 ? `${flip} bars in regime — confirmed trend`
+      : flip <= 20 ? `${flip} bars in regime — mature trend`
+      : `${flip} bars in regime — old/stretched, watch for reversal`;
+    const dirTag = ind.superTrendDir === "up"
+      ? "BULLISH regime — favors longs / CALLs"
+      : "BEARISH regime — favors shorts / PUTs";
+    const distTag = dist == null ? ""
+      : ` · price ${dist >= 0 ? "+" : ""}${dist.toFixed(2)}% from line`;
+    lines.push(`SuperTrend (ATR10, ×3): ${ind.superTrend.toFixed(2)} — ${dirTag}${distTag}${flip != null ? ` (${flipTag})` : ""}`);
+  }
   if (ind.high52w != null && ind.low52w != null) {
     const pos = ind.high52w !== ind.low52w
       ? ((ind.price - ind.low52w) / (ind.high52w - ind.low52w)) * 100
@@ -1164,6 +1192,8 @@ export async function predictMarket(args: PredictArgs): Promise<PredictionResult
         dailyCandles.candles.map((k) => k.c),
         {
           dailyVolumes: dailyCandles.candles.map((k) => k.v),
+          dailyHighs: dailyCandles.candles.map((k) => k.h),
+          dailyLows: dailyCandles.candles.map((k) => k.l),
           weeklyCloses: weeklyCandles?.candles.map((k) => k.c),
           intradayCandles: intraCandles?.candles,
         },
@@ -1285,6 +1315,12 @@ ${pastResultsBlock(args.pastResults ?? [])}
 
 TASK — work through this internally, then emit only the JSON:
 A. SCORE each input on a -2..+2 scale and tally:
+   • SuperTrend regime (ATR10×3) — this is the PRIMARY trend filter:
+       UP regime → automatic +1; UP and flipped within 2 bars → +2.
+       DOWN regime → automatic -1; DOWN and flipped within 2 bars → -2.
+       Going AGAINST the SuperTrend regime requires either (a) a fresh
+       hard catalyst within 6h, or (b) a clear extreme RSI reversion
+       setup. Otherwise, align with the regime.
    • Trend (price vs SMA20/SMA50)
    • Momentum (RSI14 + 5d/1m % change + intraday session move)
    • Mean-reversion risk (RSI extremes, position vs 52w high/low)
@@ -1815,6 +1851,41 @@ Rules:
         reasoning = `${reasoning}\n\n[VOLUME-GATE: confidence ${before.toFixed(2)} → ${confidence.toFixed(2)} ` +
           `(−${volPenalty.toFixed(2)}); ${direction} call contradicted by: ${reasons.join("; ")}.]`;
       }
+
+      // ── SUPERTREND REGIME GATE ─────────────────────────────────────────
+      // SuperTrend is the highest-quality regime filter we have. Fighting it
+      // without a fresh catalyst is a low-EV bet. Penalize bullish calls in
+      // a "down" regime and bearish calls in an "up" regime, scaled by how
+      // mature the regime is (a brand-new flip is harder to fade than a
+      // 30-bar-old stretched move).
+      const stDir = indicators.superTrendDir ?? null;
+      const stFlip = indicators.superTrendFlipBarsAgo ?? null;
+      const stDist = indicators.superTrendDistancePct ?? null;
+      const fightsRegime =
+        (direction === "BULLISH" && stDir === "down") ||
+        (direction === "BEARISH" && stDir === "up");
+      if (fightsRegime && stDir != null) {
+        // Base penalty 0.10; scaled up if regime is fresh+strong, scaled down
+        // if regime is old/stretched (where mean-reversion is more plausible).
+        let stPen = 0.10;
+        if (stFlip != null) {
+          if (stFlip <= 2)       stPen = 0.16;   // brand-new regime → biggest penalty
+          else if (stFlip <= 10) stPen = 0.12;
+          else if (stFlip <= 20) stPen = 0.08;
+          else                   stPen = 0.05;   // old regime → mean-revert is plausible
+        }
+        // If price is already far from the SuperTrend line on the regime side,
+        // a counter-trend call is even more aggressive — bump the penalty.
+        if (stDist != null && Math.abs(stDist) >= 5) stPen += 0.04;
+        // Fresh hard catalyst within 6h grants a partial pass (50% penalty).
+        if (freshCatalyst) stPen *= 0.5;
+        const before = confidence;
+        confidence = Math.max(0, confidence - stPen);
+        reasoning = `${reasoning}\n\n[SUPERTREND-GATE: confidence ${before.toFixed(2)} → ${confidence.toFixed(2)} ` +
+          `(−${stPen.toFixed(2)}); ${direction} call fights the ${stDir.toUpperCase()} regime ` +
+          `${stFlip != null ? `(${stFlip} bars in regime)` : ""}` +
+          `${freshCatalyst ? " — softened by fresh ≤6h catalyst" : ""}.]`;
+      }
     }
 
     // ── HARD CONSENSUS GATE ────────────────────────────────────────────────
@@ -2077,6 +2148,10 @@ export function evaluatePrediction(
 export interface IndicatorOptions {
   /** Per-day volume aligned 1:1 with dailyCloses (last entry = today). */
   dailyVolumes?: (number | null | undefined)[];
+  /** Per-day highs aligned 1:1 with dailyCloses — required for true ATR / SuperTrend. */
+  dailyHighs?: (number | null | undefined)[];
+  /** Per-day lows aligned 1:1 with dailyCloses — required for true ATR / SuperTrend. */
+  dailyLows?: (number | null | undefined)[];
   /** Weekly closes for the same asset (e.g. last 2y of weekly bars). */
   weeklyCloses?: number[];
   /** Today's intraday bars (for VWAP). Need .v populated to be useful. */
@@ -2211,6 +2286,99 @@ export function computeIndicators(
     trendScore = s;
   }
   const window52 = dailyCloses.slice(-252);
+
+  // ── SuperTrend (ATR 10, multiplier 3) ────────────────────────────────────
+  // Standard SuperTrend uses true high/low/close. If we have aligned highs &
+  // lows we compute the textbook version; otherwise we fall back to a
+  // close-only synthetic ATR so the indicator still renders a sane value.
+  let superTrend: number | null = null;
+  let superTrendDir: "up" | "down" | null = null;
+  let superTrendDistancePct: number | null = null;
+  let superTrendFlipBarsAgo: number | null = null;
+  {
+    const atrPeriod = 10;
+    const mult = 3;
+    const n = dailyCloses.length;
+    // Build aligned high/low arrays — fall back to close±half-prev-range if missing.
+    let highs: number[] | null = null;
+    let lows: number[] | null = null;
+    if (opts.dailyHighs && opts.dailyLows
+        && opts.dailyHighs.length === n && opts.dailyLows.length === n) {
+      const hOk = opts.dailyHighs.every((v) => typeof v === "number" && Number.isFinite(v));
+      const lOk = opts.dailyLows.every((v) => typeof v === "number" && Number.isFinite(v));
+      if (hOk && lOk) {
+        highs = opts.dailyHighs as number[];
+        lows = opts.dailyLows as number[];
+      }
+    }
+    if (n >= atrPeriod + 2) {
+      // True Range series. Without highs/lows we approximate TR_i = |close_i - close_{i-1}|.
+      const tr: number[] = new Array(n).fill(0);
+      for (let i = 1; i < n; i++) {
+        if (highs && lows) {
+          const hl = highs[i] - lows[i];
+          const hc = Math.abs(highs[i] - dailyCloses[i - 1]);
+          const lc = Math.abs(lows[i]  - dailyCloses[i - 1]);
+          tr[i] = Math.max(hl, hc, lc);
+        } else {
+          tr[i] = Math.abs(dailyCloses[i] - dailyCloses[i - 1]);
+        }
+      }
+      // Wilder's smoothing for ATR (RMA).
+      const atr: number[] = new Array(n).fill(NaN);
+      let seed = 0;
+      for (let i = 1; i <= atrPeriod; i++) seed += tr[i];
+      atr[atrPeriod] = seed / atrPeriod;
+      for (let i = atrPeriod + 1; i < n; i++) {
+        atr[i] = (atr[i - 1] * (atrPeriod - 1) + tr[i]) / atrPeriod;
+      }
+      // SuperTrend bands.
+      const upperBand: number[] = new Array(n).fill(NaN);
+      const lowerBand: number[] = new Array(n).fill(NaN);
+      const st: number[] = new Array(n).fill(NaN);
+      const dirArr: (1 | -1)[] = new Array(n).fill(1);
+      for (let i = atrPeriod; i < n; i++) {
+        const hi = highs ? highs[i] : dailyCloses[i];
+        const lo = lows ? lows[i] : dailyCloses[i];
+        const hl2 = (hi + lo) / 2;
+        const basicUpper = hl2 + mult * atr[i];
+        const basicLower = hl2 - mult * atr[i];
+        // Final upper band: lower of basic vs prior, unless prior close broke through.
+        if (i === atrPeriod) {
+          upperBand[i] = basicUpper;
+          lowerBand[i] = basicLower;
+          st[i] = basicUpper;
+          dirArr[i] = dailyCloses[i] <= basicUpper ? -1 : 1;
+        } else {
+          const prevClose = dailyCloses[i - 1];
+          upperBand[i] = (basicUpper < upperBand[i - 1] || prevClose > upperBand[i - 1])
+            ? basicUpper : upperBand[i - 1];
+          lowerBand[i] = (basicLower > lowerBand[i - 1] || prevClose < lowerBand[i - 1])
+            ? basicLower : lowerBand[i - 1];
+          // Carry direction unless price crosses the active band.
+          let dir = dirArr[i - 1];
+          if (dir === -1 && dailyCloses[i] > upperBand[i - 1]) dir = 1;
+          else if (dir === 1 && dailyCloses[i] < lowerBand[i - 1]) dir = -1;
+          dirArr[i] = dir;
+          st[i] = dir === 1 ? lowerBand[i] : upperBand[i];
+        }
+      }
+      const lastSt = st[n - 1];
+      const lastDir = dirArr[n - 1];
+      if (Number.isFinite(lastSt) && last != null) {
+        superTrend = lastSt;
+        superTrendDir = lastDir === 1 ? "up" : "down";
+        superTrendDistancePct = ((last - lastSt) / last) * 100;
+        // Bars since last flip.
+        let bars = 0;
+        for (let i = n - 2; i >= atrPeriod; i--) {
+          if (dirArr[i] !== lastDir) break;
+          bars++;
+        }
+        superTrendFlipBarsAgo = bars;
+      }
+    }
+  }
 
   // ── Volume signals ────────────────────────────────────────────────────────
   // Relative volume = today's daily volume / 20d avg daily volume.
@@ -2405,6 +2573,10 @@ export function computeIndicators(
     low52w: window52.length ? Math.min(...window52) : null,
     volatility20d: volatility(20),
     trendScore,
+    superTrend,
+    superTrendDir,
+    superTrendDistancePct,
+    superTrendFlipBarsAgo,
     relVolume,
     vwap,
     priceVsVwapPct,
