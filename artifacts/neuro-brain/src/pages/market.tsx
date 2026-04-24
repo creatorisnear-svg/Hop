@@ -1102,7 +1102,21 @@ function LivePriceChart({
   // axis still says "+0.34% in 1 hour", which is a totally different bet).
   // We hide the misleading projection and prompt for a fresh prediction.
   const predictionStale = !!prediction && prediction.horizon !== selectedHorizon;
-  const showProjection = !!prediction?.targetPrice && !predictionStale;
+  // Drawing a "forecast" line for a NEUTRAL / HOLD prediction is misleading —
+  // the server's fallback sets targetPrice ≈ currentPrice in that case, which
+  // renders as a flat wandering wave that goes nowhere (and looked broken to
+  // users: "the prediction line isn't there anymore"). When the system has
+  // no directional edge, suppress the projection entirely and surface a
+  // clear "no edge" caption below the chart instead. We still draw it for
+  // BULLISH/BEARISH predictions even when the server gates forced action=HOLD,
+  // because the underlying directional view is real and the target is meaningful.
+  const noDirectionalEdge =
+    !prediction?.targetPrice ||
+    prediction?.direction === "NEUTRAL" ||
+    (livePrice != null &&
+      prediction?.targetPrice != null &&
+      Math.abs(prediction.targetPrice - livePrice) / Math.max(livePrice, 1e-9) < 0.001);
+  const showProjection = !!prediction?.targetPrice && !predictionStale && !noDirectionalEdge;
 
   // Intraday day-trader levels — computed only on the 1D range. These are the
   // bread-and-butter reference lines a puts/calls scalper watches all day:
@@ -2158,6 +2172,29 @@ function LivePriceChart({
             </span>
             <span>·</span>
             <span>Updates every second · last call {new Date(prediction.createdAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "America/Phoenix" }) + " MST"}</span>
+          </div>
+        )}
+        {/* "No edge" caption: surfaced when a prediction exists but has no
+            directional view (NEUTRAL / forced HOLD / flat target). Replaces
+            the misleading flat-wave forecast line with an honest one-liner so
+            the chart doesn't look broken when the system says HOLD. */}
+        {prediction && !predictionStale && noDirectionalEdge && (
+          <div className="mt-2 px-3 sm:px-0 text-xs flex items-center gap-3 flex-wrap rounded-md border border-amber-500/30 bg-amber-500/5 p-2">
+            <span className="text-amber-300">
+              <span className="font-mono font-semibold">HOLD</span> · no forecast line drawn — the system has no directional edge on this setup right now.
+              {prediction.action === "HOLD" && " (See the prediction reasoning below for which signal gates triggered.)"}
+            </span>
+            {onRequestPredict && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 text-xs ml-auto"
+                onClick={onRequestPredict}
+                disabled={predicting}
+              >
+                Re-run
+              </Button>
+            )}
           </div>
         )}
         {predictionStale && (
