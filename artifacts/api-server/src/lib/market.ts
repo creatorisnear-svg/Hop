@@ -1241,22 +1241,38 @@ A. SCORE each input on a -2..+2 scale and tally:
 B. Pick direction from the SUM (positive → BULLISH, negative → BEARISH, |sum|≤1 → NEUTRAL).
 C. Confidence = clamp(0.4 + 0.1*|sum| + 0.05*(news_signal_strength), 0, 0.95).
    Lower confidence whenever signals contradict each other.
-D. Compute targetPrice with this STANDARD √t volatility-scaling formula, NOT a guess:
-     expected_pct ≈ direction_sign * (0.6 + 0.5*confidence) * min(MAX_PCT, k * volatility20d * sqrt(horizon_days))
+D. Compute targetPrice with this CALIBRATED expected-value formula, NOT a guess:
+     expected_pct ≈ direction_sign * (0.25 + 0.4*confidence) * min(MAX_PCT, k * volatility20d * sqrt(horizon_days))
    where:
      • volatility20d is the realised DAILY volatility (typical equity ≈ 1.5%, crypto ≈ 4%).
      • k = 1.0 for stocks/ETFs, 1.5 for crypto/forex/index/leveraged ETFs.
-     • horizon_days are TRADING-DAY fractions (6.5h equity session): "1h"=0.15, "4h"=0.6, "1d"=1, "1w"=5, "2w"=10, "1m"=21, "3m"=63.
-     • The (0.6 + 0.5*confidence) factor scales target between ~60% and ~110% of one expected-move sigma — usable for puts/calls scalping, not a passive long-only forecast.
+     • horizon_days are session-equivalents: stocks "1h"=0.15, "4h"=0.6, "1d"=1, "1w"=5, "2w"=10, "1m"=21, "3m"=63.
+       For 24/7 markets (crypto/forex), "1h"=0.04, "4h"=0.17, "1d"=1, "1w"=7, "2w"=14, "1m"=30, "3m"=90 (calendar days).
+     • The (0.25 + 0.4*confidence) factor is the EXPECTED VALUE of the move conditional on direction —
+       roughly 25%-65% of one σ. This is statistically honest: even at confidence 0.95 you should NOT
+       expect a full 1-σ move — that's already a 32% probability event. Picking targets near 1-σ
+       systematically overshoots (the actual outcome lands closer to 0.5σ on average for skill > random).
    Then round to a clean tradeable tick near the live quote.
    Horizon → MAX_PCT HARD CAP (3-σ tail event, almost never to be exceeded):
      "1h"=1.5, "4h"=3.0, "1d"=5, "1w"=10, "2w"=14, "1m"=20, "3m"=30.
-   IMPORTANT: this is a DAY-TRADING tool. For "1h" with vol=1.5% and confidence=0.7:
-     1.0 * 0.015 * sqrt(0.15) * (0.6 + 0.5*0.7) ≈ 0.5% → that's a real scalpable move.
-   A target smaller than 0.20% on any horizon is useless for puts/calls (premium decay
-   will eat the trade). If your computed move is < 0.20%, you may either floor it to 0.20%
-   OR drop confidence below 0.55 so action becomes HOLD. Never emit a near-zero target with
-   high confidence — that's worse than no signal at all.
+   WORKED EXAMPLE — equity "1h" scalp, vol=1.5%, confidence=0.7:
+     1.0 * 0.015 * sqrt(0.15) * (0.25 + 0.4*0.7) ≈ 0.30% → small but real scalp on 0DTE.
+   WORKED EXAMPLE — crypto "1d", vol=4%, confidence=0.7:
+     1.5 * 0.04 * sqrt(1) * (0.25 + 0.4*0.7) ≈ 3.2% → a calibrated 1d crypto target.
+   A target smaller than 0.15% on any horizon is useless for puts/calls (premium decay
+   will eat the trade). If your computed move is < 0.15%, drop confidence below 0.55 so
+   action becomes HOLD. Never emit a near-zero target with high confidence — that's worse
+   than no signal at all. Never inflate a low-conviction target to look "tradeable" — the
+   server will floor it for you ONLY when confidence ≥ 0.70.
+
+OVEREXTENSION GUARD — refuse to chase parabolic moves:
+  • If you want to go BULLISH and RSI14 ≥ 75 AND price is already above the upper Bollinger band
+    (or > 2% above intraday VWAP), you must EITHER drop confidence to ≤ 0.55 (forces HOLD)
+    OR flip to NEUTRAL — buying late into an already-stretched move is the #1 way day-traders lose.
+  • Symmetric for BEARISH: if RSI14 ≤ 25 and price is below the lower BB (or > 2% below VWAP),
+    do not pile on the short — exhaustion bounces are common at those extremes.
+  • The only exception is a fresh same-day catalyst headline (≤ 6h old) that materially changes
+    the fundamental story — earnings beat, macro print, hack, listing, partnership.
 
 CONTEXT — THIS IS A DAY-TRADING PUTS-AND-CALLS ASSISTANT:
 The user is overwhelmingly trading short-dated options (0DTE / weeklies). When the
@@ -1557,9 +1573,18 @@ Rules:
     ? agreeing.reduce((a, r) => a + r.confidence, 0) / agreeing.length
     : 0.5;
   const agreementRatio = agreeing.length / runs.length;     // 0..1
-  // Strong bonus for unanimous calls; mild penalty for split decisions.
-  const consensusAdj = agreementRatio === 1 ? 0.08 : agreementRatio >= 0.66 ? 0.0 : -0.1;
-  let confidence = Math.max(0, Math.min(0.97, meanConf + consensusAdj));
+  // Stricter calibration: unanimous gets a small bonus, super-majority is
+  // neutral, anything <2/3 agreement is treated as a real disagreement and
+  // pushed toward HOLD via a hard confidence cut. We also cap absolute
+  // confidence at 0.92 because models routinely emit 0.95+ on coin-flip
+  // setups; trimming the upper end prevents over-sized "high conviction"
+  // trades that aren't actually any more reliable than 0.80 calls.
+  const consensusAdj =
+    agreementRatio === 1     ? +0.05
+    : agreementRatio >= 0.66 ?  0.00
+    : agreementRatio >= 0.50 ? -0.15   // bare majority — meaningfully less reliable
+    :                          -0.30;  // model disagreement — almost certainly noise
+  let confidence = Math.max(0, Math.min(0.92, meanConf + consensusAdj));
 
   // Target price: median of agreeing runs (median = robust to outliers).
   const targets = agreeing.map((r) => r.targetPrice).filter((v): v is number => v != null);
@@ -1604,6 +1629,84 @@ Rules:
   }
 
   try {
+    // ── TRACK-RECORD CALIBRATION ────────────────────────────────────────────
+    // If the model has been wrong on this watch lately, downweight confidence.
+    // If it's been crushing it, give it a small bump. This is the closed-loop
+    // that lets the system learn — without it, a streak of wrong calls keeps
+    // emitting BUY_CALL/BUY_PUT at the same confidence as a clean track record.
+    const past = (args.pastResults ?? []).filter(
+      (r) => r.status === "CORRECT" || r.status === "WRONG" || r.status === "TARGET_HIT",
+    );
+    if (past.length >= 5) {
+      const correct = past.filter((r) => r.status === "CORRECT" || r.status === "TARGET_HIT").length;
+      const hitRate = correct / past.length;
+      let cal = 0;
+      if (hitRate < 0.35)      cal = -0.18;   // bad streak — strongly downweight
+      else if (hitRate < 0.45) cal = -0.10;
+      else if (hitRate < 0.55) cal = -0.04;   // ~coin flip — mild trim
+      else if (hitRate > 0.70) cal = +0.05;   // earned the upside
+      else if (hitRate > 0.60) cal = +0.02;
+      confidence = Math.max(0, Math.min(0.92, confidence + cal));
+    }
+
+    // ── OVEREXTENSION VETO ─────────────────────────────────────────────────
+    // The single biggest source of bad day-trading calls is chasing a move
+    // that already happened. When daily RSI ≥ 75 + price stretched above the
+    // upper Bollinger band OR > 2% above intraday VWAP, going long is a
+    // statistically losing trade absent a fresh catalyst. Symmetric on the
+    // bearish side. We DOWNGRADE the confidence (and thus action) instead of
+    // outright vetoing the direction so the model's qualitative reasoning
+    // still surfaces — the user just won't get a CALL/PUT signal on it.
+    if (indicators) {
+      const rsi = indicators.rsi14 ?? null;
+      const bbUpper = indicators.bbUpper ?? null;
+      const bbLower = indicators.bbLower ?? null;
+      const vwapPct = indicators.priceVsVwapPct ?? null;
+      const px = indicators.price ?? quote?.price ?? null;
+      const isCryptoLike = args.market === "crypto" || args.market === "forex";
+      // Crypto runs hotter — push the RSI thresholds out a bit so we don't
+      // over-veto perfectly normal crypto trends.
+      const rsiHi = isCryptoLike ? 80 : 75;
+      const rsiLo = isCryptoLike ? 20 : 25;
+      const overext_bull =
+        direction === "BULLISH" &&
+        ((rsi != null && rsi >= rsiHi) ||
+         (px != null && bbUpper != null && px > bbUpper) ||
+         (vwapPct != null && vwapPct > 2.0));
+      const overext_bear =
+        direction === "BEARISH" &&
+        ((rsi != null && rsi <= rsiLo) ||
+         (px != null && bbLower != null && px < bbLower) ||
+         (vwapPct != null && vwapPct < -2.0));
+      // Same-day catalyst override: if a fresh (≤6h) headline exists we don't
+      // veto — earnings beats, hacks, listings, macro prints all justify
+      // chasing an extended move.
+      const nowMs = Date.now();
+      const freshCatalyst = headlines.some((h) => {
+        const t = Date.parse(h.publishedAt);
+        return Number.isFinite(t) && nowMs - t <= 6 * 3600_000;
+      });
+      if ((overext_bull || overext_bear) && !freshCatalyst) {
+        const before = confidence;
+        confidence = Math.min(confidence, 0.54);   // forces HOLD via the next rule
+        const tag = overext_bull ? "OVEREXTENSION-VETO BULLISH" : "OVEREXTENSION-VETO BEARISH";
+        reasoning = `${reasoning}\n\n[${tag}: confidence ${before.toFixed(2)} → ${confidence.toFixed(2)}; ` +
+          `RSI14=${rsi?.toFixed(1) ?? "?"}, vs VWAP=${vwapPct?.toFixed(2) ?? "?"}%, ` +
+          `no fresh catalyst headline within 6h. Chasing extended moves is the #1 way to lose on options.]`;
+      }
+    }
+
+    // ── HARD CONSENSUS GATE ────────────────────────────────────────────────
+    // Even if confidence is high, refuse to issue a directional trade when
+    // <2/3 of the ensemble agreed on the direction. The disagreement itself
+    // is the signal — the setup is unclear and the trade is a coin flip.
+    if (agreementRatio < 0.66 && action !== "HOLD") {
+      action = "HOLD";
+      reasoning = `${reasoning}\n\n[CONSENSUS-GATE: only ${Math.round(agreementRatio * 100)}% of ${runs.length} ` +
+        `ensemble runs agreed on ${direction} — forcing HOLD because model disagreement on a directional trade ` +
+        `is itself a strong sign the setup is unclear.]`;
+    }
+
     // Safety: enforce the rules the model is supposed to follow itself.
     if (confidence < 0.55) action = "HOLD";
     if (action === "BUY_CALL" && direction !== "BULLISH") action = "HOLD";
@@ -1629,25 +1732,35 @@ Rules:
     // bid/ask spread alone eats more than that. We bump tiny targets up to
     // ~1/3 of the cap when direction is BULLISH/BEARISH, so the contract has
     // a real chance to make money inside the horizon.
+    //
+    // CALIBRATION FIX: only apply the floor when confidence is HIGH (≥0.70).
+    // Previously we floored every directional call regardless of conviction,
+    // which inflated low-conviction "maybe BULLISH" targets to look like a
+    // 1.2% scalp — misleading. If the model isn't confident, the small target
+    // is a feature, not a bug: it tells the user "directional bias but not
+    // worth a trade" and pairs with the action being HOLD.
     const HORIZON_TARGET_FLOOR: Record<string, number> = {
-      "1h":  0.0035, // 0.35% — typical 1h scalp move on liquid equity
-      "4h":  0.0070, // 0.70%
-      "1d":  0.0120, // 1.20%
-      "1w":  0.0250, // 2.5%
-      "2w":  0.0350,
-      "1m":  0.0500,
-      "3m":  0.0800,
+      "1h":  0.0030, // 0.30% — typical 1h scalp move on liquid equity
+      "4h":  0.0060, // 0.60%
+      "1d":  0.0100, // 1.00%
+      "1w":  0.0220, // 2.2%
+      "2w":  0.0320,
+      "1m":  0.0450,
+      "3m":  0.0750,
     };
     const cap = HORIZON_TARGET_CAP[args.horizon] ?? 0.18;
-    const floor = HORIZON_TARGET_FLOOR[args.horizon] ?? 0.0;
+    const rawFloor = HORIZON_TARGET_FLOOR[args.horizon] ?? 0.0;
+    // Floor only kicks in when confidence ≥ 0.70 — otherwise leave the small
+    // target alone so it honestly reflects the model's uncertainty.
+    const floor = confidence >= 0.70 ? rawFloor : 0;
     if (targetPrice && quote?.price) {
       const move = (targetPrice - quote.price) / quote.price;
       // Cap (down): trim 3σ-tail predictions back to realistic envelope.
       if (move >  cap) targetPrice = quote.price * (1 + cap);
       if (move < -cap) targetPrice = quote.price * (1 - cap);
-      // Floor (up): if the model picked a directional view but with a target
-      // too small to scalp, expand toward floor so the chart reflects a
-      // tradeable expected move (still bounded by the cap above).
+      // Floor (up): if the model picked a HIGH-CONVICTION directional view
+      // but with a target too small to scalp, expand toward floor so the
+      // chart reflects a tradeable expected move (still bounded by cap above).
       if (floor > 0 && Math.abs(move) < floor) {
         if (direction === "BULLISH") targetPrice = quote.price * (1 + floor);
         else if (direction === "BEARISH") targetPrice = quote.price * (1 - floor);
@@ -1658,12 +1771,24 @@ Rules:
     // it. Now covers intraday horizons too, scaled by √t so the synthetic
     // target obeys the same vol-scaling math the prompt uses.
     if (!targetPrice && quote?.price) {
-      const horizonScale: Record<string, number> = {
-        "1h":  0.005, "4h":  0.010, "1d":  0.020,
-        "1w":  0.030, "2w":  0.045, "1m":  0.065, "3m":  0.110,
-      };
-      const base = horizonScale[args.horizon] ?? 0.025;
-      const magnitude = base * (0.6 + 0.5 * confidence);
+      // Per-horizon σ proxy. Crypto/forex doubled because daily vol is ~2-3x
+      // equity. Multiplier (0.25 + 0.4*conf) matches the prompt's calibrated
+      // expected-value formula so synthetic targets don't overshoot the
+      // model's own targets.
+      const isCryptoLike = args.market === "crypto" || args.market === "forex";
+      const base = (() => {
+        const stockBase: Record<string, number> = {
+          "1h":  0.004, "4h":  0.009, "1d":  0.017,
+          "1w":  0.028, "2w":  0.040, "1m":  0.060, "3m":  0.100,
+        };
+        const cryptoBase: Record<string, number> = {
+          "1h":  0.008, "4h":  0.018, "1d":  0.040,
+          "1w":  0.060, "2w":  0.085, "1m":  0.130, "3m":  0.220,
+        };
+        const tbl = isCryptoLike ? cryptoBase : stockBase;
+        return tbl[args.horizon] ?? 0.025;
+      })();
+      const magnitude = base * (0.25 + 0.4 * confidence);
       if (direction === "BULLISH") targetPrice = quote.price * (1 + magnitude);
       else if (direction === "BEARISH") targetPrice = quote.price * (1 - magnitude);
       else targetPrice = quote.price;
