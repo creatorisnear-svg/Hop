@@ -56,3 +56,4 @@ Recommended models by instance size:
 - Frontend page at `/market` lets the user add a watch (Yahoo-Finance ticker, e.g. `AAPL`, `BTC-USD`, `^GSPC`), pick a horizon (1d / 1w / 1m / 3m), and hit "Predict now".
 - Backend pulls fresh headlines from Google News RSS + a live quote from Yahoo Finance's chart endpoint, then asks Gemini 2.5 Flash for a JSON forecast (`direction`, `confidence`, `summary`, `reasoning`).
 - Predictions are stored in `market_predictions` (history per watch) and shown with the cited headlines as evidence.
+- The price chart renders OHLC **candlesticks** (wicks for high/low, colored body for open→close: green up / red down). On the 1D range, live 1-second ticks fold into a "forming" 1-min bucket candle that pulses. Hovering any candle shows an OHLC + timestamp tooltip with a crosshair.

@@ -87,6 +87,14 @@ interface HeadlineWithSentiment {
   sentiment?: "BULLISH" | "BEARISH" | "NEUTRAL";
 }
 
+interface Candle {
+  t: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+}
+
 interface CandleSeries {
   symbol: string;
   interval: string;
@@ -94,7 +102,7 @@ interface CandleSeries {
   currency: string | null;
   marketState: string | null;
   previousClose: number | null;
-  candles: { t: number; c: number }[];
+  candles: Candle[];
 }
 
 type EvalStatus =
@@ -517,6 +525,14 @@ const RANGE_PRESETS: Record<string, { interval: string; range: string; label: st
   "1Y": { interval: "1d",  range: "1y",  label: "1Y" },
 };
 
+const RANGE_BUCKET_MS: Record<string, number> = {
+  "1D": 60_000,         // 1 minute candles
+  "5D": 15 * 60_000,    // 15 minute candles
+  "1M": 60 * 60_000,    // 1 hour candles
+  "6M": 24 * 3600_000,  // 1 day candles
+  "1Y": 24 * 3600_000,  // 1 day candles
+};
+
 function LivePriceChart({
   watch,
   prediction,
@@ -529,6 +545,7 @@ function LivePriceChart({
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [livePoints, setLivePoints] = useState<{ t: number; c: number }[]>([]);
   const [tickAt, setTickAt] = useState<number>(0);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
   // Fetch base candles for the chosen range every 30s.
   useEffect(() => {
@@ -578,16 +595,42 @@ function LivePriceChart({
     return () => { cancelled = true; clearInterval(id); };
   }, [watch.symbol]);
 
-  // Only mix the 1-second live ticks in when looking at the intraday range — on
-  // a 1-month chart a 1-second tick is meaningless and would distort scaling.
-  const histPoints = useMemo(() => {
+  // On the intraday range, fold the 1-second live ticks into a "live forming"
+  // candle so the wick reflects real-time volatility since the last completed
+  // bar. On longer ranges the 1s ticks are meaningless and would distort scale.
+  const histCandles = useMemo<Candle[]>(() => {
     const base = series?.candles ?? [];
     if (rangeKey !== "1D") return base;
-    if (!base.length) return livePoints;
-    const lastT = base[base.length - 1].t;
-    const tail = livePoints.filter((p) => p.t > lastT);
-    return [...base, ...tail];
+    if (!livePoints.length) return base;
+
+    const bucketMs = RANGE_BUCKET_MS["1D"];
+    const lastBaseT = base.length ? base[base.length - 1].t : 0;
+    // Only consider live ticks past the last completed historical bucket.
+    const tail = livePoints.filter((p) => p.t > lastBaseT + bucketMs - 1);
+    if (!tail.length) return base;
+
+    const out: Candle[] = [...base];
+    let cur: Candle | null = null;
+    for (const tick of tail) {
+      const bucketStart = Math.floor(tick.t / bucketMs) * bucketMs;
+      if (!cur || cur.t !== bucketStart) {
+        if (cur) out.push(cur);
+        cur = { t: bucketStart, o: tick.c, h: tick.c, l: tick.c, c: tick.c };
+      } else {
+        if (tick.c > cur.h) cur.h = tick.c;
+        if (tick.c < cur.l) cur.l = tick.c;
+        cur.c = tick.c;
+      }
+    }
+    if (cur) out.push(cur);
+    return out;
   }, [series, livePoints, rangeKey]);
+
+  const liveCandleCount = useMemo(() => {
+    if (rangeKey !== "1D") return 0;
+    const baseLen = series?.candles.length ?? 0;
+    return Math.max(0, histCandles.length - baseLen);
+  }, [histCandles, series, rangeKey]);
 
   const horizon = prediction?.horizon ?? "1w";
   const projectionMs = HORIZON_MS[horizon] ?? HORIZON_MS["1w"];
@@ -604,15 +647,17 @@ function LivePriceChart({
   }, [prediction]);
 
   const histView = useMemo(() => {
-    if (histPoints.length === 0) return null;
-    const tMin = histPoints[0].t;
-    const tMax = histPoints[histPoints.length - 1].t;
+    if (histCandles.length === 0) return null;
+    const tMin = histCandles[0].t;
+    const tMax = histCandles[histCandles.length - 1].t;
 
+    // Scale to wick extremes (high / low), not just close — otherwise the
+    // wicks get clipped and you can't see real intraday volatility.
     let pMin = Number.POSITIVE_INFINITY;
     let pMax = Number.NEGATIVE_INFINITY;
-    for (const p of histPoints) {
-      if (p.c < pMin) pMin = p.c;
-      if (p.c > pMax) pMax = p.c;
+    for (const c of histCandles) {
+      if (c.l < pMin) pMin = c.l;
+      if (c.h > pMax) pMax = c.h;
     }
     // For the intraday view, anchor the y-range to previous close so daily
     // change is readable. (Skip on multi-day ranges to avoid stretching.)
@@ -621,23 +666,26 @@ function LivePriceChart({
       pMax = Math.max(pMax, series.previousClose);
     }
     if (pMin === pMax) { pMin -= 1; pMax += 1; }
-    const pad = (pMax - pMin) * 0.1;
+    const pad = (pMax - pMin) * 0.08;
     pMin -= pad; pMax += pad;
 
     const x0 = dims.padL;
     const x1 = dims.splitX;
     const y0 = dims.padT;
     const y1 = dims.h - dims.padB;
+    const innerW = x1 - x0;
     const xOf = (t: number) => x0 + ((t - tMin) / Math.max(tMax - tMin, 1)) * (x1 - x0);
     const yOf = (c: number) => y0 + (1 - (c - pMin) / Math.max(pMax - pMin, 1e-9)) * (y1 - y0);
-    const path = histPoints.map((p, i) => `${i === 0 ? "M" : "L"}${xOf(p.t).toFixed(2)} ${yOf(p.c).toFixed(2)}`).join(" ");
-    const lastPoint = histPoints[histPoints.length - 1];
-    return { xOf, yOf, path, pMin, pMax, tMin, tMax, lastPoint, x0, x1, y0, y1 };
-  }, [histPoints, rangeKey, series, dims]);
+    // Body width: leave ~30% of the slot as gap, clamp to a sane visual range.
+    const slot = innerW / Math.max(histCandles.length, 1);
+    const bodyW = Math.max(1, Math.min(12, slot * 0.7));
+    const lastCandle = histCandles[histCandles.length - 1];
+    return { xOf, yOf, pMin, pMax, tMin, tMax, lastCandle, x0, x1, y0, y1, bodyW, slot };
+  }, [histCandles, rangeKey, series, dims]);
 
   const fcastView = useMemo(() => {
     if (!dims.hasForecast || !histView || !prediction?.targetPrice) return null;
-    const start = histView.lastPoint.c;
+    const start = histView.lastCandle.c;
     const target = prediction.targetPrice;
     const lo = Math.min(start, target);
     const hi = Math.max(start, target);
@@ -650,7 +698,7 @@ function LivePriceChart({
     const x1 = dims.w - dims.padR;
     const y0 = dims.padT;
     const y1 = dims.h - dims.padB;
-    const tStart = histView.lastPoint.t;
+    const tStart = histView.lastCandle.t;
     const tEnd = tStart + projectionMs;
     const xOf = (t: number) => x0 + ((t - tStart) / Math.max(tEnd - tStart, 1)) * (x1 - x0);
     const yOf = (c: number) => y0 + (1 - (c - pMin) / Math.max(pMax - pMin, 1e-9)) * (y1 - y0);
@@ -760,22 +808,121 @@ function LivePriceChart({
                   textAnchor="end" fontSize="9" fill="hsl(var(--muted-foreground))">prev close</text>
               </>
             )}
-            {/* historical line + soft fill */}
-            <path d={`${histView.path} L${histView.x1.toFixed(2)} ${histView.y1.toFixed(2)} L${histView.x0.toFixed(2)} ${histView.y1.toFixed(2)} Z`}
-              fill="hsl(var(--primary))" opacity={0.08} />
-            <path d={histView.path} fill="none" stroke="hsl(var(--primary))" strokeWidth={1.8} />
-            {/* live dot */}
-            {livePrice != null && (
+            {/* OHLC candles — wick = high/low, body = open/close */}
+            {histCandles.map((c, i) => {
+              const x = histView.xOf(c.t);
+              const yH = histView.yOf(c.h);
+              const yL = histView.yOf(c.l);
+              const yO = histView.yOf(c.o);
+              const yC = histView.yOf(c.c);
+              const up = c.c >= c.o;
+              const color = up ? "#22c55e" : "#ef4444";
+              const bodyTop = Math.min(yO, yC);
+              // Doji guard: ensure the body is visible even when o == c.
+              const bodyH = Math.max(1, Math.abs(yC - yO));
+              const baseLen = series?.candles.length ?? 0;
+              const isLive = rangeKey === "1D" && i >= baseLen;
+              const dimmed = hoverIdx != null && hoverIdx !== i;
+              return (
+                <g key={`cdl${i}`} opacity={dimmed ? 0.45 : 1}>
+                  <line
+                    x1={x} x2={x} y1={yH} y2={yL}
+                    stroke={color} strokeWidth={1}
+                    strokeLinecap="round"
+                  />
+                  <rect
+                    x={x - histView.bodyW / 2}
+                    y={bodyTop}
+                    width={histView.bodyW}
+                    height={bodyH}
+                    fill={up ? color : color}
+                    opacity={isLive ? 0.65 : 1}
+                    stroke={color}
+                    strokeWidth={isLive ? 1.2 : 0.5}
+                  />
+                </g>
+              );
+            })}
+            {/* Invisible hover hit-areas — one per slot — so the cursor can pick
+                even thin candles. Drawn on top so they capture mouse events. */}
+            {histCandles.map((c, i) => {
+              const x = histView.xOf(c.t);
+              const w = Math.max(histView.bodyW + 2, histView.slot);
+              return (
+                <rect
+                  key={`hit${i}`}
+                  x={x - w / 2}
+                  y={histView.y0}
+                  width={w}
+                  height={histView.y1 - histView.y0}
+                  fill="transparent"
+                  onMouseEnter={() => setHoverIdx(i)}
+                  onMouseLeave={() => setHoverIdx(null)}
+                />
+              );
+            })}
+            {/* Live pulse on the most recent candle's close */}
+            {livePrice != null && histView.lastCandle && (
               <>
-                <circle cx={histView.xOf(histView.lastPoint.t)} cy={histView.yOf(histView.lastPoint.c)} r={4}
-                  fill="hsl(var(--primary))" />
-                <circle cx={histView.xOf(histView.lastPoint.t)} cy={histView.yOf(histView.lastPoint.c)} r={8}
-                  fill="hsl(var(--primary))" opacity={0.25}>
-                  <animate attributeName="r" values="4;10;4" dur="1.4s" repeatCount="indefinite" />
+                <circle
+                  cx={histView.xOf(histView.lastCandle.t)}
+                  cy={histView.yOf(histView.lastCandle.c)}
+                  r={3}
+                  fill="hsl(var(--primary))"
+                />
+                <circle
+                  cx={histView.xOf(histView.lastCandle.t)}
+                  cy={histView.yOf(histView.lastCandle.c)}
+                  r={7}
+                  fill="hsl(var(--primary))"
+                  opacity={0.25}
+                >
+                  <animate attributeName="r" values="3;9;3" dur="1.4s" repeatCount="indefinite" />
                   <animate attributeName="opacity" values="0.4;0;0.4" dur="1.4s" repeatCount="indefinite" />
                 </circle>
               </>
             )}
+            {/* OHLC tooltip for hovered candle */}
+            {hoverIdx != null && histCandles[hoverIdx] && (() => {
+              const c = histCandles[hoverIdx];
+              const x = histView.xOf(c.t);
+              const tipW = 116;
+              const tipH = 78;
+              // Anchor tooltip to whichever side has more room.
+              const tipX = x + tipW + 4 > histView.x1
+                ? Math.max(histView.x0, x - tipW - 6)
+                : x + 6;
+              const tipY = Math.max(histView.y0, histView.yOf(c.h) - tipH - 4);
+              const up = c.c >= c.o;
+              const baseLen = series?.candles.length ?? 0;
+              const isLive = rangeKey === "1D" && hoverIdx >= baseLen;
+              const tipColor = up ? "#22c55e" : "#ef4444";
+              return (
+                <g pointerEvents="none">
+                  {/* crosshair */}
+                  <line x1={x} x2={x} y1={histView.y0} y2={histView.y1}
+                    stroke="hsl(var(--muted-foreground))" strokeDasharray="2 3" opacity={0.5} />
+                  <rect x={tipX} y={tipY} width={tipW} height={tipH} rx={4}
+                    fill="hsl(var(--background))" stroke={tipColor} strokeWidth={1} opacity={0.95} />
+                  <text x={tipX + 6} y={tipY + 13} fontSize="9.5" fontFamily="monospace"
+                    fill="hsl(var(--muted-foreground))">
+                    {fmtTime(c.t)}{isLive ? " · live" : ""}
+                  </text>
+                  <text x={tipX + 6} y={tipY + 27} fontSize="10" fontFamily="monospace" fill="hsl(var(--foreground))">
+                    O <tspan fill={tipColor}>{fmtPrice(c.o)}</tspan>
+                  </text>
+                  <text x={tipX + 6} y={tipY + 40} fontSize="10" fontFamily="monospace" fill="hsl(var(--foreground))">
+                    H <tspan fill="#22c55e">{fmtPrice(c.h)}</tspan>
+                  </text>
+                  <text x={tipX + 6} y={tipY + 53} fontSize="10" fontFamily="monospace" fill="hsl(var(--foreground))">
+                    L <tspan fill="#ef4444">{fmtPrice(c.l)}</tspan>
+                  </text>
+                  <text x={tipX + 6} y={tipY + 66} fontSize="10" fontFamily="monospace" fill="hsl(var(--foreground))">
+                    C <tspan fill={tipColor}>{fmtPrice(c.c)}</tspan>
+                  </text>
+                </g>
+              );
+            })()}
 
             {/* DIVIDER + FORECAST PANEL */}
             {fcastView && (

@@ -75,6 +75,9 @@ export interface PredictionResult {
 
 export interface CandlePoint {
   t: number;
+  o: number;
+  h: number;
+  l: number;
   c: number;
 }
 
@@ -187,19 +190,38 @@ export async function fetchYahooCandles(
             previousClose?: number;
           };
           timestamp?: number[];
-          indicators?: { quote?: Array<{ close?: (number | null)[] }> };
+          indicators?: {
+            quote?: Array<{
+              open?: (number | null)[];
+              high?: (number | null)[];
+              low?: (number | null)[];
+              close?: (number | null)[];
+            }>;
+          };
         }>;
       };
     };
     const r = data.chart?.result?.[0];
     if (!r || !r.timestamp) return null;
-    const closes = r.indicators?.quote?.[0]?.close ?? [];
+    const q = r.indicators?.quote?.[0];
+    const opens = q?.open ?? [];
+    const highs = q?.high ?? [];
+    const lows = q?.low ?? [];
+    const closes = q?.close ?? [];
     const candles: CandlePoint[] = [];
     for (let i = 0; i < r.timestamp.length; i++) {
+      const o = opens[i];
+      const h = highs[i];
+      const l = lows[i];
       const c = closes[i];
-      if (typeof c === "number" && Number.isFinite(c)) {
-        candles.push({ t: r.timestamp[i] * 1000, c });
-      }
+      // Only keep bars with a valid close. If open/high/low is missing for any
+      // reason (some Yahoo intervals occasionally drop a field), fall back to
+      // the close so the bar still renders as a doji-like marker.
+      if (typeof c !== "number" || !Number.isFinite(c)) continue;
+      const oo = typeof o === "number" && Number.isFinite(o) ? o : c;
+      const hh = typeof h === "number" && Number.isFinite(h) ? h : Math.max(oo, c);
+      const ll = typeof l === "number" && Number.isFinite(l) ? l : Math.min(oo, c);
+      candles.push({ t: r.timestamp[i] * 1000, o: oo, h: hh, l: ll, c });
     }
     return {
       symbol: r.meta?.symbol ?? symbol,
