@@ -1082,10 +1082,10 @@ function LivePriceChart({
     const w = containerW;
     const hasForecast = prediction?.targetPrice != null;
     const h = isNarrow ? (hasForecast ? 360 : 320) : (hasForecast ? 460 : 420);
-    const padL = isNarrow ? 38 : 54;
-    const padR = isNarrow ? 12 : 22;
-    const padT = isNarrow ? 12 : 18;
-    const padB = isNarrow ? 26 : 32;
+    const padL = isNarrow ? 44 : 54;
+    const padR = isNarrow ? 6 : 22;
+    const padT = isNarrow ? 10 : 18;
+    const padB = isNarrow ? 22 : 32;
     return { w, h, padL, padR, padT, padB, hasForecast };
   }, [prediction, containerW, isNarrow]);
 
@@ -1248,7 +1248,7 @@ function LivePriceChart({
         </div>
       </CardHeader>
       <CardContent>
-        <div ref={containerRef} className="w-full" style={{ height: dims.h }}>
+        <div ref={containerRef} className="w-full overflow-hidden" style={{ height: dims.h }}>
         {!view ? (
           <div className="w-full h-full flex items-center justify-center text-sm text-muted-foreground">
             Loading market data…
@@ -1256,7 +1256,7 @@ function LivePriceChart({
         ) : (
           <svg
             viewBox={`0 0 ${dims.w} ${dims.h}`}
-            width={dims.w}
+            width="100%"
             height={dims.h}
             preserveAspectRatio="none"
             className="block"
@@ -1271,15 +1271,15 @@ function LivePriceChart({
             {[0, 0.25, 0.5, 0.75, 1].map((f) => {
               const y = view.y0 + f * (view.y1 - view.y0);
               const v = view.pMax - f * (view.pMax - view.pMin);
-              return <text key={`hy${f}`} x={view.x0 - 6} y={y + 3} textAnchor="end" fontSize="10"
+              return <text key={`hy${f}`} x={view.x0 - 4} y={y + 3} textAnchor="end" fontSize={isNarrow ? "9" : "10"}
                 fill="hsl(var(--muted-foreground))" fontFamily="monospace">{fmtPrice(v)}</text>;
             })}
             {/* x labels for the history portion */}
             {[0, 0.5, 1].map((f) => {
               const x = view.histPxStart + f * (view.histPxEnd - view.histPxStart);
               const t = view.tMin + f * (view.histTMax - view.tMin);
-              return <text key={`hx${f}`} x={x} y={dims.h - 8} textAnchor={f === 0 ? "start" : f === 1 ? "end" : "middle"}
-                fontSize="10" fill="hsl(var(--muted-foreground))" fontFamily="monospace">{fmtTime(t)}</text>;
+              return <text key={`hx${f}`} x={x} y={dims.h - 6} textAnchor={f === 0 ? "start" : f === 1 ? "end" : "middle"}
+                fontSize={isNarrow ? "8" : "10"} fill="hsl(var(--muted-foreground))" fontFamily="monospace">{fmtTime(t)}</text>;
             })}
             {/* prev close reference (intraday only) — extends across full chart */}
             {rangeKey === "1D" && series?.previousClose && (
