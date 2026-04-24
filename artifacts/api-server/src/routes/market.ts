@@ -172,13 +172,56 @@ router.post("/market/watches/:id/predict", async (req, res) => {
   if (!watch) return res.status(404).json({ error: "watch not found" });
 
   try {
-    // Allow caller to override (1..5). Default to 3-run ensemble — that's the
-    // sweet spot for accuracy vs. latency: catches single-run hallucinations
-    // and stabilises the targetPrice via median aggregation.
+    // Allow caller to override (1..5). Default bumped to 5 — gives us full
+    // temperature spread (0.1 → 0.7) so consensus is statistically tighter.
     const ensembleRaw = Number(req.body?.ensemble);
     const ensemble = Number.isFinite(ensembleRaw)
       ? Math.max(1, Math.min(5, Math.floor(ensembleRaw)))
-      : 3;
+      : 5;
+
+    // ── Self-calibration: feed the model its own recent track record ─────
+    // Pull the last 20 predictions on this watch, evaluate each against the
+    // live quote, and pass them as `pastResults` so the model can spot its
+    // own biases ("I overcall BULLISH on this ticker — tone confidence down").
+    const recent = await db
+      .select()
+      .from(marketPredictionsTable)
+      .where(eq(marketPredictionsTable.watchId, id))
+      .orderBy(desc(marketPredictionsTable.createdAt))
+      .limit(20);
+    let livePrice: number | null = null;
+    const cacheHit = quoteCache.get(watch.symbol);
+    if (cacheHit && Date.now() - cacheHit.ts < QUOTE_TTL_MS) {
+      livePrice = (cacheHit.data as { price?: number | null })?.price ?? null;
+    } else {
+      const q = await fetchYahooQuote(watch.symbol);
+      if (q) {
+        quoteCache.set(watch.symbol, { ts: Date.now(), data: q });
+        livePrice = q.price;
+      }
+    }
+    const pastResults = recent.map((p) => {
+      const evalResult = evaluatePrediction(
+        {
+          direction: p.direction,
+          horizon: p.horizon,
+          targetPrice: p.targetPrice ?? null,
+          quote: p.quote as ReturnType<typeof JSON.parse> | null,
+          createdAt: p.createdAt,
+        },
+        livePrice,
+      );
+      const daysAgo = Math.max(0, Math.round((Date.now() - new Date(p.createdAt).getTime()) / 86_400_000));
+      return {
+        direction: p.direction,
+        action: p.action ?? null,
+        horizon: p.horizon,
+        confidence: typeof p.confidence === "number" ? p.confidence : null,
+        status: evalResult.status,
+        deltaPct: evalResult.deltaPct,
+        daysAgo,
+      };
+    });
 
     const result = await predictMarket({
       symbol: watch.symbol,
@@ -187,6 +230,7 @@ router.post("/market/watches/:id/predict", async (req, res) => {
       horizon,
       notes: watch.notes,
       ensemble,
+      pastResults,
     });
 
     const predictionId = randomUUID();

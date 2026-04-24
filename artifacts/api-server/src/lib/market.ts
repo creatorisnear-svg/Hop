@@ -40,6 +40,19 @@ export interface IndicatorsResult {
   volatility20d: number | null;
   // Multi-timeframe trend agreement scoring (-3..+3)
   trendScore: number | null;
+  // Volume signals — driven by daily/intraday candle volumes when available.
+  // Relative volume = today's volume / 20d avg volume (so "unusual volume"
+  // is anything > ~1.5x). VWAP and price vs VWAP read intraday institutional
+  // bias.
+  relVolume: number | null;
+  vwap: number | null;
+  priceVsVwapPct: number | null;
+  // Weekly timeframe — used to confirm the daily signal. When daily and
+  // weekly agree the call is much higher conviction.
+  weeklySma20: number | null;
+  priceVsWeeklySma20Pct: number | null;
+  weeklyRsi14: number | null;
+  weeklyTrendTag: string | null;    // e.g. "weekly bull", "weekly bear", "weekly choppy"
   asOf: string;
 }
 
@@ -142,6 +155,10 @@ export interface CandlePoint {
   h: number;
   l: number;
   c: number;
+  // Optional volume — populated from Yahoo's chart endpoint when available.
+  // Frontend chart code ignores it; the indicators pipeline uses it for
+  // relative-volume and VWAP signals.
+  v?: number;
 }
 
 export interface CandleSeries {
@@ -259,6 +276,7 @@ export async function fetchYahooCandles(
               high?: (number | null)[];
               low?: (number | null)[];
               close?: (number | null)[];
+              volume?: (number | null)[];
             }>;
           };
         }>;
@@ -271,12 +289,14 @@ export async function fetchYahooCandles(
     const highs = q?.high ?? [];
     const lows = q?.low ?? [];
     const closes = q?.close ?? [];
+    const vols = q?.volume ?? [];
     const candles: CandlePoint[] = [];
     for (let i = 0; i < r.timestamp.length; i++) {
       const o = opens[i];
       const h = highs[i];
       const l = lows[i];
       const c = closes[i];
+      const v = vols[i];
       // Only keep bars with a valid close. If open/high/low is missing for any
       // reason (some Yahoo intervals occasionally drop a field), fall back to
       // the close so the bar still renders as a doji-like marker.
@@ -284,7 +304,9 @@ export async function fetchYahooCandles(
       const oo = typeof o === "number" && Number.isFinite(o) ? o : c;
       const hh = typeof h === "number" && Number.isFinite(h) ? h : Math.max(oo, c);
       const ll = typeof l === "number" && Number.isFinite(l) ? l : Math.min(oo, c);
-      candles.push({ t: r.timestamp[i] * 1000, o: oo, h: hh, l: ll, c });
+      const point: CandlePoint = { t: r.timestamp[i] * 1000, o: oo, h: hh, l: ll, c };
+      if (typeof v === "number" && Number.isFinite(v) && v >= 0) point.v = v;
+      candles.push(point);
     }
     return {
       symbol: r.meta?.symbol ?? symbol,
@@ -669,6 +691,11 @@ export interface PredictArgs {
   // direction + average targetPrice/confidence — significantly tighter
   // than a single-shot call.
   ensemble?: number;
+  // Self-calibration: pass in the model's own past predictions on this watch
+  // (most recent first). The prompt embeds them as a "TRACK RECORD" block so
+  // the model can spot its own systematic biases ("I overcall BULLISH on this
+  // ticker — tone confidence down").
+  pastResults?: PastPredictionRow[];
 }
 
 function indicatorsBlock(ind: IndicatorsResult | null): string {
@@ -722,6 +749,82 @@ function indicatorsBlock(ind: IndicatorsResult | null): string {
     lines.push(`52w high: ${ind.high52w.toFixed(2)} · low: ${ind.low52w.toFixed(2)}${pos != null ? ` (price at ${pos.toFixed(0)}% of range)` : ""}`);
   }
   if (ind.volatility20d != null) lines.push(`20d daily volatility: ${ind.volatility20d.toFixed(2)}%`);
+
+  // Volume signals
+  if (ind.relVolume != null) {
+    const rvTag = ind.relVolume >= 2 ? "MASSIVE volume — possible institutional"
+      : ind.relVolume >= 1.5 ? "elevated volume — confirms move"
+      : ind.relVolume >= 0.7 ? "normal volume"
+      : "low volume — move lacks conviction";
+    lines.push(`Relative volume: ${ind.relVolume.toFixed(2)}x 20d avg (${rvTag})`);
+  }
+  if (ind.vwap != null && ind.priceVsVwapPct != null) {
+    const vTag = ind.priceVsVwapPct > 0.3 ? "above VWAP (intraday bullish)"
+      : ind.priceVsVwapPct < -0.3 ? "below VWAP (intraday bearish)"
+      : "at VWAP (neutral)";
+    lines.push(`Intraday VWAP: ${ind.vwap.toFixed(2)} — price ${ind.priceVsVwapPct >= 0 ? "+" : ""}${ind.priceVsVwapPct.toFixed(2)}% vs VWAP (${vTag})`);
+  }
+
+  // Weekly timeframe — confirms or contradicts the daily call.
+  if (ind.weeklySma20 != null && ind.priceVsWeeklySma20Pct != null) {
+    const wTag = ind.weeklyTrendTag ?? (ind.priceVsWeeklySma20Pct > 0 ? "weekly above SMA20" : "weekly below SMA20");
+    lines.push(`Weekly SMA20: ${ind.weeklySma20.toFixed(2)} — price ${ind.priceVsWeeklySma20Pct >= 0 ? "+" : ""}${ind.priceVsWeeklySma20Pct.toFixed(2)}% (${wTag})`);
+  }
+  if (ind.weeklyRsi14 != null) {
+    const wRsiTag = ind.weeklyRsi14 >= 70 ? "weekly overbought"
+      : ind.weeklyRsi14 <= 30 ? "weekly oversold"
+      : "weekly neutral";
+    lines.push(`Weekly RSI14: ${ind.weeklyRsi14.toFixed(1)} (${wRsiTag})`);
+  }
+  return lines.join("\n");
+}
+
+// Compact formatter for the model's own past predictions on this watch — used
+// for self-calibration ("you've been overconfident on bullish calls — tone it
+// down"). The model sees only outcomes, not prices, so it focuses on its
+// hit rate per direction / action / horizon.
+export interface PastPredictionRow {
+  direction: string;
+  action: string | null;
+  horizon: string;
+  confidence: number | null;
+  status: EvaluationStatus;
+  deltaPct: number | null;
+  daysAgo: number;
+}
+
+function pastResultsBlock(rows: PastPredictionRow[]): string {
+  if (!rows.length) return "(no prior predictions on this watch yet)";
+  // Aggregate counters first so the model sees the headline rate.
+  const dirCounts: Record<string, { settled: number; correct: number }> = {};
+  let settled = 0, correct = 0;
+  for (const r of rows) {
+    const isSettled = r.status === "CORRECT" || r.status === "WRONG" || r.status === "TARGET_HIT";
+    if (!isSettled) continue;
+    settled++;
+    const ok = r.status === "CORRECT" || r.status === "TARGET_HIT";
+    if (ok) correct++;
+    const d = (dirCounts[r.direction] ??= { settled: 0, correct: 0 });
+    d.settled++;
+    if (ok) d.correct++;
+  }
+  const lines: string[] = [];
+  const overallPct = settled ? Math.round((correct / settled) * 100) : null;
+  lines.push(`Overall hit rate: ${correct}/${settled} settled = ${overallPct ?? "n/a"}%`);
+  for (const dir of ["BULLISH", "BEARISH", "NEUTRAL"]) {
+    const d = dirCounts[dir];
+    if (d && d.settled) {
+      const pct = Math.round((d.correct / d.settled) * 100);
+      lines.push(`  ${dir}: ${d.correct}/${d.settled} = ${pct}%`);
+    }
+  }
+  // Per-row recent history (most recent first).
+  lines.push("Recent calls (most recent first):");
+  for (const r of rows.slice(0, 10)) {
+    const moveStr = r.deltaPct != null ? `${r.deltaPct >= 0 ? "+" : ""}${r.deltaPct.toFixed(2)}%` : "—";
+    const confStr = r.confidence != null ? ` @ conf ${r.confidence.toFixed(2)}` : "";
+    lines.push(`  ${r.daysAgo}d ago: ${r.direction}/${r.action ?? "HOLD"} (${r.horizon})${confStr} → ${r.status} (${moveStr})`);
+  }
   return lines.join("\n");
 }
 
@@ -751,16 +854,27 @@ export async function predictMarket(args: PredictArgs): Promise<PredictionResult
   // Earnings are only relevant for actual stocks. Skip the API call for crypto,
   // forex and indexes — they'll just say "unavailable" anyway.
   const isStockLike = args.market === "stock" || args.market === "etf";
-  const [headlines, quote, earnings, dailyCandles, intraCandles] = await Promise.all([
+  const [headlines, quote, earnings, dailyCandles, intraCandles, weeklyCandles] = await Promise.all([
     fetchHeadlines(query),
     fetchYahooQuote(args.symbol),
     isStockLike ? fetchEarnings(args.symbol) : Promise.resolve<EarningsInfo | null>(null),
     fetchYahooCandles(args.symbol, "1d", "1y"),
     fetchYahooCandles(args.symbol, "5m", "1d"),
+    // Weekly bars over 2 years — used to compute the weekly trend timeframe
+    // confirmation (weekly SMA20 + weekly RSI14). Failure is non-fatal.
+    fetchYahooCandles(args.symbol, "1wk", "2y"),
   ]);
 
   const indicators = dailyCandles
-    ? computeIndicators(args.symbol, dailyCandles.candles.map((k) => k.c))
+    ? computeIndicators(
+        args.symbol,
+        dailyCandles.candles.map((k) => k.c),
+        {
+          dailyVolumes: dailyCandles.candles.map((k) => k.v),
+          weeklyCloses: weeklyCandles?.candles.map((k) => k.c),
+          intradayCandles: intraCandles?.candles,
+        },
+      )
     : null;
 
   const headlineBlock = headlines.length
@@ -801,6 +915,9 @@ ${earningsBlock(earnings)}
 
 RECENT HEADLINES
 ${headlineBlock}
+
+YOUR TRACK RECORD ON THIS WATCH (self-calibration — adjust your confidence accordingly)
+${pastResultsBlock(args.pastResults ?? [])}
 
 TASK — work through this internally, then emit only the JSON:
 A. SCORE each input on a -2..+2 scale and tally:
@@ -1243,7 +1360,20 @@ export function evaluatePrediction(
   return { status, entryPrice: entry, currentPrice, deltaPct, reachedTarget, isDue };
 }
 
-export function computeIndicators(symbol: string, dailyCloses: number[]): IndicatorsResult {
+export interface IndicatorOptions {
+  /** Per-day volume aligned 1:1 with dailyCloses (last entry = today). */
+  dailyVolumes?: (number | null | undefined)[];
+  /** Weekly closes for the same asset (e.g. last 2y of weekly bars). */
+  weeklyCloses?: number[];
+  /** Today's intraday bars (for VWAP). Need .v populated to be useful. */
+  intradayCandles?: CandlePoint[];
+}
+
+export function computeIndicators(
+  symbol: string,
+  dailyCloses: number[],
+  opts: IndicatorOptions = {},
+): IndicatorsResult {
   const last = dailyCloses.length ? dailyCloses[dailyCloses.length - 1] : null;
   const change = (n: number): number | null => {
     if (last == null || dailyCloses.length <= n) return null;
@@ -1367,6 +1497,68 @@ export function computeIndicators(symbol: string, dailyCloses: number[]): Indica
     trendScore = s;
   }
   const window52 = dailyCloses.slice(-252);
+
+  // ── Volume signals ────────────────────────────────────────────────────────
+  // Relative volume = today's daily volume / 20d avg daily volume.
+  let relVolume: number | null = null;
+  if (opts.dailyVolumes && opts.dailyVolumes.length === dailyCloses.length) {
+    const vols = opts.dailyVolumes
+      .map((v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null))
+      .filter((v): v is number => v != null);
+    if (vols.length >= 21) {
+      const today = vols[vols.length - 1];
+      const past20 = vols.slice(-21, -1);
+      const avg = past20.reduce((a, b) => a + b, 0) / past20.length;
+      if (avg > 0 && today >= 0) relVolume = today / avg;
+    }
+  }
+  // Intraday VWAP = Σ(price·volume) / Σ(volume) across today's bars.
+  let vwap: number | null = null;
+  let priceVsVwapPct: number | null = null;
+  if (opts.intradayCandles && opts.intradayCandles.length) {
+    let pv = 0;
+    let v = 0;
+    for (const k of opts.intradayCandles) {
+      const typical = (k.h + k.l + k.c) / 3;
+      const vol = k.v ?? 0;
+      if (vol > 0) { pv += typical * vol; v += vol; }
+    }
+    if (v > 0) {
+      vwap = pv / v;
+      if (last != null && vwap > 0) priceVsVwapPct = ((last - vwap) / vwap) * 100;
+    }
+  }
+
+  // ── Weekly timeframe ─────────────────────────────────────────────────────
+  // Compute weekly SMA20 + RSI14 to confirm/contradict the daily call.
+  let weeklySma20: number | null = null;
+  let weeklyRsi14: number | null = null;
+  let priceVsWeeklySma20Pct: number | null = null;
+  let weeklyTrendTag: string | null = null;
+  const wk = opts.weeklyCloses ?? [];
+  if (wk.length >= 20) {
+    const slice = wk.slice(-20);
+    weeklySma20 = slice.reduce((a, b) => a + b, 0) / slice.length;
+    if (last != null && weeklySma20) {
+      priceVsWeeklySma20Pct = ((last - weeklySma20) / weeklySma20) * 100;
+    }
+  }
+  if (wk.length >= 15) {
+    let g = 0, l = 0;
+    for (let i = wk.length - 14; i < wk.length; i++) {
+      const d = wk[i] - wk[i - 1];
+      if (d >= 0) g += d; else l -= d;
+    }
+    const ag = g / 14, al = l / 14;
+    weeklyRsi14 = al === 0 ? 100 : 100 - 100 / (1 + ag / al);
+  }
+  if (weeklySma20 != null && last != null && weeklyRsi14 != null) {
+    const above = last > weeklySma20;
+    if (above && weeklyRsi14 >= 55) weeklyTrendTag = "weekly bull";
+    else if (!above && weeklyRsi14 <= 45) weeklyTrendTag = "weekly bear";
+    else weeklyTrendTag = "weekly choppy";
+  }
+
   return {
     symbol,
     price: last,
@@ -1389,6 +1581,13 @@ export function computeIndicators(symbol: string, dailyCloses: number[]): Indica
     low52w: window52.length ? Math.min(...window52) : null,
     volatility20d: volatility(20),
     trendScore,
+    relVolume,
+    vwap,
+    priceVsVwapPct,
+    weeklySma20,
+    priceVsWeeklySma20Pct,
+    weeklyRsi14,
+    weeklyTrendTag,
     asOf: new Date().toISOString(),
   };
 }
