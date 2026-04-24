@@ -20,7 +20,7 @@ import ImagesPage from "@/pages/images";
 import MemoryPage from "@/pages/memory";
 import KeysPage from "@/pages/keys";
 import JarvisActionsPage from "@/pages/jarvis-actions";
-import { JarvisChat } from "@/components/jarvis-chat";
+import JarvisPage from "@/pages/jarvis";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -48,6 +48,7 @@ function Router() {
       <Route path="/memory" component={MemoryPage} />
       <Route path="/keys" component={KeysPage} />
       <Route path="/jarvis-actions" component={JarvisActionsPage} />
+      <Route path="/jarvis" component={JarvisPage} />
       <Route component={NotFound} />
     </Switch>
   );
@@ -59,7 +60,6 @@ function App() {
       <TooltipProvider>
         <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
           <Router />
-          <JarvisChat />
         </WouterRouter>
         <Toaster theme="dark" />
       </TooltipProvider>

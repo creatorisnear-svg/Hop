@@ -43,6 +43,32 @@ router.get("/runs", async (req, res) => {
 
 router.post("/runs", async (req, res) => {
   const body = CreateRunBody.parse(req.body);
+  const rawPriorIds = (req.body as { priorRunIds?: unknown })?.priorRunIds;
+  const priorRunIds = Array.isArray(rawPriorIds)
+    ? rawPriorIds.filter((x): x is string => typeof x === "string").slice(0, 20)
+    : [];
+
+  // Build a "prior conversation" context string from the goal + finalAnswer of
+  // each previously referenced run, in chronological order. This lets the new
+  // run feel like a continuation of an ongoing chat instead of a cold start.
+  let priorContext = "";
+  if (priorRunIds.length > 0) {
+    const rows = await db.select().from(runsTable);
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const ordered = priorRunIds
+      .map((id) => byId.get(id))
+      .filter((r): r is RunRow => Boolean(r))
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    if (ordered.length > 0) {
+      priorContext = ordered
+        .map((r, i) => {
+          const ans = (r.finalAnswer ?? "").slice(0, 2000);
+          return `--- Prior turn ${i + 1} ---\nUser: ${r.goal}\nJarvis: ${ans || "(no answer recorded)"}`;
+        })
+        .join("\n\n");
+    }
+  }
+
   const id = randomUUID();
   const [row] = await db
     .insert(runsTable)
@@ -54,7 +80,7 @@ router.post("/runs", async (req, res) => {
     })
     .returning();
   // Fire and forget — orchestrator runs in background
-  runBrain(id, body.goal, body.maxIterations ?? 6).catch(() => {});
+  runBrain(id, body.goal, body.maxIterations ?? 6, priorContext || undefined).catch(() => {});
   res.status(201).json(summarize(row));
 });
 

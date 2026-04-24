@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Link, useLocation } from "wouter";
 import {
   Activity, Brain, Play, LayoutDashboard, Settings, Zap, Wrench, Moon, Sparkles,
-  Webhook, Puzzle, Image as ImageIcon, Key, ShieldAlert, Menu, X,
+  Webhook, Puzzle, Image as ImageIcon, Key, ShieldAlert, Menu, X, Bot,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
@@ -14,6 +14,7 @@ interface LayoutProps {
 
 const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/jarvis", label: "Jarvis", icon: Bot },
   { href: "/run/new", label: "New Run", icon: Play },
   { href: "/runs", label: "Runs History", icon: Activity },
   { href: "/synapses", label: "Synapses", icon: Zap },

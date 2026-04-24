@@ -87,8 +87,18 @@ function MessageBubble({ m }: { m: ChatMessage }) {
   );
 }
 
-export function JarvisChat() {
+interface JarvisChatProps {
+  /**
+   * When true (default), the chat renders as a full-height panel that fills
+   * its parent container — used by the dedicated Jarvis tab. When false the
+   * legacy floating-bubble UI is rendered.
+   */
+  embedded?: boolean;
+}
+
+export function JarvisChat({ embedded = true }: JarvisChatProps = {}) {
   const [open, setOpen] = useState<boolean>(() => {
+    if (embedded) return true;
     try {
       return localStorage.getItem(STORAGE_KEY) === "1";
     } catch {
@@ -353,7 +363,7 @@ export function JarvisChat() {
     setMessages([]);
   }, []);
 
-  if (!open) {
+  if (!open && !embedded) {
     return (
       <button
         onClick={() => setOpen(true)}
@@ -369,10 +379,15 @@ export function JarvisChat() {
   return (
     <div
       className={cn(
-        "fixed z-50 flex flex-col rounded-xl border border-border bg-background/95 backdrop-blur shadow-2xl shadow-primary/10",
-        expanded
-          ? "inset-4 sm:inset-10"
-          : "bottom-4 right-4 left-4 sm:left-auto sm:right-5 sm:bottom-5 w-auto sm:w-[420px] h-[70vh] sm:h-[600px] max-h-[calc(100vh-2rem)]",
+        "flex flex-col bg-background/95 backdrop-blur",
+        embedded
+          ? "relative w-full h-[calc(100dvh-8rem)] sm:h-[calc(100dvh-7rem)] rounded-xl border border-border shadow-xl shadow-primary/5"
+          : cn(
+              "fixed z-50 rounded-xl border border-border shadow-2xl shadow-primary/10",
+              expanded
+                ? "inset-4 sm:inset-10"
+                : "bottom-4 right-4 left-4 sm:left-auto sm:right-5 sm:bottom-5 w-auto sm:w-[420px] h-[70vh] sm:h-[600px] max-h-[calc(100vh-2rem)]",
+            ),
       )}
     >
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
@@ -392,18 +407,22 @@ export function JarvisChat() {
           <Button variant="ghost" size="icon" className="h-7 w-7" onClick={clearHistory} title="Clear history">
             <Trash2 className="w-3.5 h-3.5" />
           </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            onClick={() => setExpanded((e) => !e)}
-            title={expanded ? "Shrink" : "Expand"}
-          >
-            {expanded ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
-          </Button>
-          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setOpen(false)} title="Close">
-            <X className="w-3.5 h-3.5" />
-          </Button>
+          {!embedded && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={() => setExpanded((e) => !e)}
+              title={expanded ? "Shrink" : "Expand"}
+            >
+              {expanded ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+            </Button>
+          )}
+          {!embedded && (
+            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setOpen(false)} title="Close">
+              <X className="w-3.5 h-3.5" />
+            </Button>
+          )}
         </div>
       </div>
 

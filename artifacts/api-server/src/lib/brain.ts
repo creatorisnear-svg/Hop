@@ -139,7 +139,7 @@ function formatPlanMessage(plan: JarvisPlan): string {
   return lines.join("\n");
 }
 
-export async function runBrain(runId: string, goal: string, maxIterations: number) {
+export async function runBrain(runId: string, goal: string, maxIterations: number, priorContext?: string) {
   const checkCancel = () => {
     if (cancelled.has(runId)) {
       cancelled.delete(runId);
@@ -157,7 +157,10 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
     checkCancel();
     const planStart = Date.now();
     const hint = await planningHint();
-    const plan = await jarvisPlan(goal, hint);
+    const fullHint = priorContext
+      ? `Prior conversation with this user (most recent last):\n${priorContext}\n\n${hint ?? ""}`.trim()
+      : hint;
+    const plan = await jarvisPlan(goal, fullHint);
     await recordMessage(
       runId,
       "jarvis",
@@ -267,7 +270,10 @@ export async function runBrain(runId: string, goal: string, maxIterations: numbe
     // ----- Jarvis synthesizes the final answer -----
     checkCancel();
     const synthStart = Date.now();
-    const finalAnswer = await jarvisSynthesize(goal, synthInputs);
+    const goalForSynth = priorContext
+      ? `${goal}\n\n(Note: this is a follow-up message in an ongoing conversation. Prior turns:\n${priorContext}\n)`
+      : goal;
+    const finalAnswer = await jarvisSynthesize(goalForSynth, synthInputs);
     await recordMessage(
       runId,
       "jarvis",
