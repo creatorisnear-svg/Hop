@@ -775,10 +775,11 @@ function WatchDetail({ watch }: { watch: Watch }) {
     return () => clearInterval(id);
   }, [load]);
 
-  // Track whether the user wants the prediction to re-run automatically in the
-  // background. Default ON so the chart's projection always reflects the
-  // freshest model call without burning the user out clicking "Predict" again.
-  const [autoPredict, setAutoPredict] = useState(true);
+  // Track whether the user wants the prediction to re-run automatically in
+  // the background. Default OFF — the user opts in by toggling "Auto", which
+  // avoids silently burning Gemini quota on a watch they may have just opened
+  // to glance at the chart.
+  const [autoPredict, setAutoPredict] = useState(false);
   const predictingRef = useRef(false);
   useEffect(() => { predictingRef.current = predicting; }, [predicting]);
 
@@ -976,16 +977,15 @@ function LivePriceChart({
     return () => clearInterval(id);
   }, []);
 
-  // Track real pixel size of the chart container so the SVG renders at 1:1
-  // and we don't get the "letterboxed and squashed" look on phones. We use
-  // useLayoutEffect for the initial measurement so the very first paint
-  // already has the correct width — otherwise the SVG mounts with the
-  // default 760 viewBox, gets squished into the actual (narrower) container
-  // by `preserveAspectRatio="none"`, and only "unsquishes" a frame later
-  // once the ResizeObserver fires. That visible flicker is exactly what
-  // users were seeing on mobile after page load.
+  // Track real pixel size of the chart container. We start at 0 (NOT 760)
+  // and gate the SVG render on containerW > 0 so the chart literally cannot
+  // exist with a stale/guessed width. Combined with width="100%" and
+  // preserveAspectRatio="xMidYMid meet" on the SVG below, this guarantees
+  // the viewBox always matches the real container width on first paint, so
+  // there is no scaling and therefore no squish — even on mobile, even when
+  // a sibling card later re-flows the layout.
   const containerRef = useRef<HTMLDivElement>(null);
-  const [containerW, setContainerW] = useState(760);
+  const [containerW, setContainerW] = useState(0);
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -999,7 +999,7 @@ function LivePriceChart({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  const isNarrow = containerW < 520;
+  const isNarrow = containerW > 0 && containerW < 520;
 
   // Fetch base candles for the chosen range every 30s.
   useEffect(() => {
@@ -1263,18 +1263,18 @@ function LivePriceChart({
         </div>
       </CardHeader>
       <CardContent className="p-0 sm:p-6">
-        <div ref={containerRef} className="w-full overflow-hidden" style={{ height: dims.h }}>
-        {!view ? (
+        <div ref={containerRef} className="w-full overflow-hidden" style={{ height: dims.h || 320 }}>
+        {!view || containerW === 0 ? (
           <div className="w-full h-full flex items-center justify-center text-sm text-muted-foreground">
             Loading market data…
           </div>
         ) : (
           <svg
             viewBox={`0 0 ${dims.w} ${dims.h}`}
-            width={dims.w}
+            width="100%"
             height={dims.h}
-            preserveAspectRatio="xMinYMin meet"
-            className="block max-w-full"
+            preserveAspectRatio="xMidYMid meet"
+            className="block"
           >
             {/* horizontal grid (full width including forecast zone) */}
             {[0.2, 0.4, 0.6, 0.8].map((f) => {
