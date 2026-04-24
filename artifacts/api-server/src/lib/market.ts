@@ -48,6 +48,16 @@ export interface IndicatorsResult {
   relVolume: number | null;
   vwap: number | null;
   priceVsVwapPct: number | null;
+  // Deeper volume analytics — surface money-flow / accumulation patterns the
+  // model can use to confirm or veto a directional setup. These are the
+  // signals that distinguish "real move" from "low-volume drift".
+  avgVolume20d: number | null;          // baseline 20d avg daily volume (raw)
+  volumeTrend5v20: number | null;       // 5d avg vol ÷ 20d avg vol (>1.2 = building, <0.8 = drying)
+  upDayVolumeRatio: number | null;      // Σ vol on UP days ÷ Σ vol on DOWN days (last 20d). >1.3 = accumulation, <0.77 = distribution
+  obvSlope10dPct: number | null;        // OBV % change over last 10 days (positive = money in)
+  intradayVolumePacePct: number | null; // today's intraday cumulative vol ÷ pro-rated 20d avg (100% = normal pace)
+  volumeConfirmsMove: "confirms" | "diverges" | "neutral" | null;
+                                        // does today's vol agree with today's price direction?
   // Intraday momentum — used by 1h / 4h / 0DTE scalp predictions. The daily
   // RSI lags too much for short-term options trades; these read live momentum
   // off today's 5-min bars.
@@ -958,13 +968,55 @@ function indicatorsBlock(ind: IndicatorsResult | null): string {
   }
   if (ind.volatility20d != null) lines.push(`20d daily volatility: ${ind.volatility20d.toFixed(2)}%`);
 
-  // Volume signals
+  // Volume signals — heavy block, this is one of the strongest edges in the
+  // model. Smart money leaves footprints in volume long before it shows up
+  // in price.
   if (ind.relVolume != null) {
-    const rvTag = ind.relVolume >= 2 ? "MASSIVE volume — possible institutional"
+    const rvTag = ind.relVolume >= 3 ? "EXTREME volume (3x+) — institutional flow / news"
+      : ind.relVolume >= 2 ? "MASSIVE volume — possible institutional"
       : ind.relVolume >= 1.5 ? "elevated volume — confirms move"
       : ind.relVolume >= 0.7 ? "normal volume"
       : "low volume — move lacks conviction";
-    lines.push(`Relative volume: ${ind.relVolume.toFixed(2)}x 20d avg (${rvTag})`);
+    lines.push(`Today's relative volume: ${ind.relVolume.toFixed(2)}x 20d avg (${rvTag})`);
+  }
+  if (ind.intradayVolumePacePct != null) {
+    const pTag = ind.intradayVolumePacePct >= 200 ? "PACE: 2x normal — heavy day forming"
+      : ind.intradayVolumePacePct >= 130 ? "PACE: above normal — building"
+      : ind.intradayVolumePacePct >= 70 ? "PACE: normal"
+      : "PACE: well below normal — quiet session";
+    lines.push(`Intraday volume pace: ${ind.intradayVolumePacePct.toFixed(0)}% of typical-by-now (${pTag})`);
+  }
+  if (ind.volumeTrend5v20 != null) {
+    const tTag = ind.volumeTrend5v20 >= 1.3 ? "ramping up — interest building over the week"
+      : ind.volumeTrend5v20 >= 1.0 ? "stable / mild build"
+      : ind.volumeTrend5v20 >= 0.8 ? "softening — interest fading"
+      : "drying up — move losing fuel";
+    lines.push(`5d vs 20d volume trend: ${ind.volumeTrend5v20.toFixed(2)}x (${tTag})`);
+  }
+  if (ind.upDayVolumeRatio != null) {
+    // >1.3 = accumulation (more vol on green than red), <0.77 = distribution
+    const aTag = ind.upDayVolumeRatio >= 2.0 ? "STRONG ACCUMULATION — green days dominate volume"
+      : ind.upDayVolumeRatio >= 1.3 ? "accumulation pattern"
+      : ind.upDayVolumeRatio >= 0.77 ? "balanced — no clear flow bias"
+      : ind.upDayVolumeRatio >= 0.5 ? "distribution pattern"
+      : "STRONG DISTRIBUTION — red days dominate volume";
+    lines.push(`Up/Down volume ratio (last 20d): ${ind.upDayVolumeRatio.toFixed(2)} (${aTag})`);
+  }
+  if (ind.obvSlope10dPct != null) {
+    const oTag = ind.obvSlope10dPct >= 25 ? "money flowing IN strongly"
+      : ind.obvSlope10dPct >= 8 ? "money flowing in"
+      : ind.obvSlope10dPct >= -8 ? "neutral money flow"
+      : ind.obvSlope10dPct >= -25 ? "money flowing out"
+      : "money flowing OUT strongly";
+    lines.push(`OBV slope (10d): ${ind.obvSlope10dPct >= 0 ? "+" : ""}${ind.obvSlope10dPct.toFixed(1)}% (${oTag})`);
+  }
+  if (ind.volumeConfirmsMove != null) {
+    const cTag = ind.volumeConfirmsMove === "confirms"
+      ? "TODAY: volume CONFIRMS the price direction — high-quality move"
+      : ind.volumeConfirmsMove === "diverges"
+      ? "TODAY: volume DIVERGES from price — move is suspect / likely fade"
+      : "TODAY: volume is neutral — no confirmation either way";
+    lines.push(`Volume/price agreement: ${cTag}`);
   }
   if (ind.vwap != null && ind.priceVsVwapPct != null) {
     const vTag = ind.priceVsVwapPct > 0.3 ? "above VWAP (intraday bullish)"
@@ -1238,6 +1290,17 @@ A. SCORE each input on a -2..+2 scale and tally:
    • Mean-reversion risk (RSI extremes, position vs 52w high/low)
    • Earnings (most recent Q1 surprise + proximity of next earnings date)
    • News tone (count of clearly bullish vs bearish headlines)
+   • VOLUME / MONEY FLOW (this is critical — most low-quality predictions
+     ignore it):
+       - Today's relative volume (>1.5x = move backed by interest;
+         <0.7x = move is a trap on no participation)
+       - Intraday volume PACE (today building heavy or fading?)
+       - 5d-vs-20d volume trend (interest building or drying?)
+       - Up/Down volume ratio over last 20d (accumulation pattern → score
+         +1 to +2 toward BULLISH; distribution pattern → score -1 to -2)
+       - OBV slope 10d (positive = money in → bullish; negative = money out)
+       - Volume/price AGREEMENT today (confirms = high-quality; diverges =
+         downgrade conviction by 1 full point regardless of other signals)
 B. Pick direction from the SUM (positive → BULLISH, negative → BEARISH, |sum|≤1 → NEUTRAL).
 C. Confidence = clamp(0.4 + 0.1*|sum| + 0.05*(news_signal_strength), 0, 0.95).
    Lower confidence whenever signals contradict each other.
@@ -1327,8 +1390,9 @@ Rules:
 - If volatility20d is unavailable, assume 1.5% daily vol for stocks/ETFs, 4% for crypto.
 - If earnings were unavailable, you may say so in reasoning but still produce the forecast.
 - Cite headlines by [n] when you reference them; cite specific numbers (RSI value, % change, SMA price, put/call ratio) when you cite technicals or positioning.
-- For 1h / 4h horizons: weight intraday RSI(5m), VWAP, options put/call flow, and SPY relative-strength FAR more than weekly/monthly trends. The latter barely move within 1 hour.
-- For 1w / 1m / 3m horizons: weight daily/weekly trend, earnings, and headline themes more than intraday noise.
+- For 1h / 4h horizons: weight intraday RSI(5m), VWAP, options put/call flow, intraday volume PACE, and SPY relative-strength FAR more than weekly/monthly trends. The latter barely move within 1 hour.
+- For 1w / 1m / 3m horizons: weight daily/weekly trend, the 5d/20d volume trend, up/down volume ratio (accumulation vs distribution), OBV slope, earnings, and headline themes more than intraday noise.
+- VOLUME RULE: your reasoning MUST explicitly cite at least ONE volume metric by number (relVolume, intraday pace, up/down vol ratio, OBV slope, or volume/price agreement). A directional call without a volume reference will be marked low-confidence by the server.
 - No prose outside the JSON.`;
 
   // ── PARSING HELPERS (shared across ensemble runs) ────────────────────────
@@ -1693,6 +1757,63 @@ Rules:
         reasoning = `${reasoning}\n\n[${tag}: confidence ${before.toFixed(2)} → ${confidence.toFixed(2)}; ` +
           `RSI14=${rsi?.toFixed(1) ?? "?"}, vs VWAP=${vwapPct?.toFixed(2) ?? "?"}%, ` +
           `no fresh catalyst headline within 6h. Chasing extended moves is the #1 way to lose on options.]`;
+      }
+
+      // ── VOLUME-CONFIRMATION GATE ───────────────────────────────────────
+      // A directional call without volume confirmation is statistically
+      // weaker. We tier the penalty: a strong contradiction (bullish call
+      // into clear distribution OR diverging volume on a stretched move)
+      // gets a hard cut; a softer mismatch is a mild trim. We do NOT veto
+      // outright when volume agrees, even mildly — the goal is to PUNISH
+      // calls that fight the tape, not to require perfect volume.
+      const volConfirms = indicators.volumeConfirmsMove ?? null;
+      const upDownVol = indicators.upDayVolumeRatio ?? null;
+      const obvSlope  = indicators.obvSlope10dPct ?? null;
+      const volTrend  = indicators.volumeTrend5v20 ?? null;
+      let volPenalty = 0;
+      const reasons: string[] = [];
+
+      if (direction === "BULLISH") {
+        // Distribution pattern strongly contradicts a bullish call.
+        if (upDownVol != null && upDownVol < 0.7) {
+          volPenalty += 0.10;
+          reasons.push(`up/down vol ratio ${upDownVol.toFixed(2)} = distribution`);
+        }
+        // Money flowing OUT of the asset — bullish call needs explanation.
+        if (obvSlope != null && obvSlope < -10) {
+          volPenalty += 0.08;
+          reasons.push(`OBV slope ${obvSlope.toFixed(1)}% (money flowing out)`);
+        }
+        // Today's price/volume divergence on the same day = unconvincing.
+        if (volConfirms === "diverges") {
+          volPenalty += 0.07;
+          reasons.push(`today's volume diverges from price`);
+        }
+        // Volume is drying up while we're trying to catch a rally.
+        if (volTrend != null && volTrend < 0.75) {
+          volPenalty += 0.04;
+          reasons.push(`5d/20d vol ratio ${volTrend.toFixed(2)} = interest fading`);
+        }
+      } else if (direction === "BEARISH") {
+        // Strong accumulation contradicts a bearish call.
+        if (upDownVol != null && upDownVol > 1.5) {
+          volPenalty += 0.10;
+          reasons.push(`up/down vol ratio ${upDownVol.toFixed(2)} = accumulation`);
+        }
+        if (obvSlope != null && obvSlope > 10) {
+          volPenalty += 0.08;
+          reasons.push(`OBV slope +${obvSlope.toFixed(1)}% (money flowing in)`);
+        }
+        if (volConfirms === "diverges") {
+          volPenalty += 0.07;
+          reasons.push(`today's volume diverges from price`);
+        }
+      }
+      if (volPenalty > 0) {
+        const before = confidence;
+        confidence = Math.max(0, confidence - volPenalty);
+        reasoning = `${reasoning}\n\n[VOLUME-GATE: confidence ${before.toFixed(2)} → ${confidence.toFixed(2)} ` +
+          `(−${volPenalty.toFixed(2)}); ${direction} call contradicted by: ${reasons.join("; ")}.]`;
       }
     }
 
@@ -2094,31 +2215,119 @@ export function computeIndicators(
   // ── Volume signals ────────────────────────────────────────────────────────
   // Relative volume = today's daily volume / 20d avg daily volume.
   let relVolume: number | null = null;
+  let avgVolume20d: number | null = null;
+  let volumeTrend5v20: number | null = null;
+  let upDayVolumeRatio: number | null = null;
+  let obvSlope10dPct: number | null = null;
+  let intradayVolumePacePct: number | null = null;
+  let volumeConfirmsMove: "confirms" | "diverges" | "neutral" | null = null;
+  // We need the dailyVolumes aligned 1:1 with dailyCloses for the rolling
+  // calculations below. Sanitize first so bad rows (nulls / NaN) don't break
+  // the math.
+  let alignedVols: number[] | null = null;
   if (opts.dailyVolumes && opts.dailyVolumes.length === dailyCloses.length) {
-    const vols = opts.dailyVolumes
-      .map((v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null))
-      .filter((v): v is number => v != null);
-    if (vols.length >= 21) {
-      const today = vols[vols.length - 1];
-      const past20 = vols.slice(-21, -1);
-      const avg = past20.reduce((a, b) => a + b, 0) / past20.length;
-      if (avg > 0 && today >= 0) relVolume = today / avg;
+    const sanitized = opts.dailyVolumes.map((v) =>
+      typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0,
+    );
+    // Treat all-zero series as missing data instead of fake "low volume".
+    const sumVol = sanitized.reduce((a, b) => a + b, 0);
+    if (sumVol > 0) alignedVols = sanitized;
+  }
+  if (alignedVols && alignedVols.length >= 21) {
+    const today = alignedVols[alignedVols.length - 1];
+    const past20 = alignedVols.slice(-21, -1);
+    const avg20 = past20.reduce((a, b) => a + b, 0) / past20.length;
+    if (avg20 > 0) {
+      relVolume = today / avg20;
+      avgVolume20d = avg20;
+      // Volume trend: 5d avg vs 20d avg. >1 means recent volume building.
+      if (alignedVols.length >= 5) {
+        const past5 = alignedVols.slice(-5);
+        const avg5 = past5.reduce((a, b) => a + b, 0) / 5;
+        volumeTrend5v20 = avg5 / avg20;
+      }
+      // Up-day vs down-day volume over last 20 sessions. This is the classic
+      // accumulation/distribution read: if buyers show up on green days and
+      // sellers don't on red days, ratio > 1.3 → smart-money accumulating.
+      // The reverse (heavier volume on down days) → distribution.
+      if (dailyCloses.length === alignedVols.length && alignedVols.length >= 21) {
+        let upVol = 0, downVol = 0;
+        for (let i = alignedVols.length - 20; i < alignedVols.length; i++) {
+          const d = dailyCloses[i] - dailyCloses[i - 1];
+          const v = alignedVols[i];
+          if (d > 0) upVol += v; else if (d < 0) downVol += v;
+        }
+        if (downVol > 0) upDayVolumeRatio = upVol / downVol;
+        else if (upVol > 0) upDayVolumeRatio = 99;     // all up days, no down volume — extreme bullish
+      }
+    }
+    // OBV (on-balance volume) slope over last 10 sessions, expressed as %
+    // change. OBV cumulates +vol on up closes, -vol on down closes; its slope
+    // shows whether money is flowing IN or OUT of the asset.
+    if (dailyCloses.length === alignedVols.length && alignedVols.length >= 11) {
+      const obv: number[] = [0];
+      for (let i = 1; i < alignedVols.length; i++) {
+        const d = dailyCloses[i] - dailyCloses[i - 1];
+        const prev = obv[obv.length - 1];
+        if (d > 0)      obv.push(prev + alignedVols[i]);
+        else if (d < 0) obv.push(prev - alignedVols[i]);
+        else            obv.push(prev);
+      }
+      const past = obv[obv.length - 11];
+      const now  = obv[obv.length - 1];
+      if (past !== 0 && Number.isFinite(past)) {
+        obvSlope10dPct = ((now - past) / Math.abs(past)) * 100;
+      } else if (now !== 0) {
+        // OBV crossed zero in the window — express slope vs avg daily volume
+        obvSlope10dPct = avg20 > 0 ? (now - past) / (avg20 * 10) * 100 : null;
+      }
+    }
+    // Volume confirms or diverges from today's price move. Only meaningful
+    // when relVolume itself is meaningful (≥ 0.8x avg).
+    if (relVolume != null && relVolume >= 0.8 && dailyCloses.length >= 2) {
+      const prevPx = dailyCloses[dailyCloses.length - 2];
+      const todayPx = dailyCloses[dailyCloses.length - 1];
+      const dayMove = (todayPx - prevPx) / prevPx;
+      const moved = Math.abs(dayMove) >= 0.005;        // ≥ 0.5% move
+      if (!moved) volumeConfirmsMove = "neutral";
+      else if (relVolume >= 1.3 && dayMove > 0) volumeConfirmsMove = "confirms";   // up day on heavy vol
+      else if (relVolume >= 1.3 && dayMove < 0) volumeConfirmsMove = "confirms";   // down day on heavy vol
+      else if (relVolume <= 0.85) volumeConfirmsMove = "diverges";                 // move on light vol = unconvincing
+      else volumeConfirmsMove = "neutral";
     }
   }
   // Intraday VWAP = Σ(price·volume) / Σ(volume) across today's bars.
+  // Also compute today's intraday VOLUME PACE — how today's cumulative volume
+  // so far compares to a typical full session pro-rated by elapsed time. >130%
+  // = today is shaping up to be a heavy-volume day; <70% = light day.
   let vwap: number | null = null;
   let priceVsVwapPct: number | null = null;
   if (opts.intradayCandles && opts.intradayCandles.length) {
     let pv = 0;
     let v = 0;
+    let firstTs = Infinity;
+    let lastTs = -Infinity;
     for (const k of opts.intradayCandles) {
       const typical = (k.h + k.l + k.c) / 3;
       const vol = k.v ?? 0;
       if (vol > 0) { pv += typical * vol; v += vol; }
+      if (k.t < firstTs) firstTs = k.t;
+      if (k.t > lastTs) lastTs = k.t;
     }
     if (v > 0) {
       vwap = pv / v;
       if (last != null && vwap > 0) priceVsVwapPct = ((last - vwap) / vwap) * 100;
+    }
+    // Pace calc: assume a 6.5h equity session by default. For 24/7 markets
+    // (crypto) the session is 24h — intradayCandles covers the rolling
+    // calendar day, so we pro-rate by the same span.
+    if (avgVolume20d && v > 0 && Number.isFinite(firstTs) && Number.isFinite(lastTs) && lastTs > firstTs) {
+      const elapsedMin = (lastTs - firstTs) / 60_000;
+      // Rough heuristic: if first→last span > 8h treat as 24h market, else 390min equity.
+      const sessionMin = elapsedMin > 8 * 60 ? 24 * 60 : 390;
+      const elapsedFraction = Math.min(1, Math.max(0.05, elapsedMin / sessionMin));
+      const expectedSoFar = avgVolume20d * elapsedFraction;
+      if (expectedSoFar > 0) intradayVolumePacePct = (v / expectedSoFar) * 100;
     }
   }
 
@@ -2199,6 +2408,12 @@ export function computeIndicators(
     relVolume,
     vwap,
     priceVsVwapPct,
+    avgVolume20d,
+    volumeTrend5v20,
+    upDayVolumeRatio,
+    obvSlope10dPct,
+    intradayVolumePacePct,
+    volumeConfirmsMove,
     weeklySma20,
     priceVsWeeklySma20Pct,
     weeklyRsi14,
