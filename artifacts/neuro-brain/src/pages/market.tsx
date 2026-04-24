@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Layout } from "@/components/layout";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -972,19 +972,24 @@ function LivePriceChart({
   }, []);
 
   // Track real pixel size of the chart container so the SVG renders at 1:1
-  // and we don't get the "letterboxed and squashed" look on phones (which is
-  // what `preserveAspectRatio` defaults to with a fixed-aspect viewBox).
+  // and we don't get the "letterboxed and squashed" look on phones. We use
+  // useLayoutEffect for the initial measurement so the very first paint
+  // already has the correct width — otherwise the SVG mounts with the
+  // default 760 viewBox, gets squished into the actual (narrower) container
+  // by `preserveAspectRatio="none"`, and only "unsquishes" a frame later
+  // once the ResizeObserver fires. That visible flicker is exactly what
+  // users were seeing on mobile after page load.
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerW, setContainerW] = useState(760);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    setContainerW(Math.max(280, Math.floor(el.getBoundingClientRect().width)));
-    const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const w = Math.max(280, Math.floor(entry.contentRect.width));
-        setContainerW((prev) => (Math.abs(prev - w) > 1 ? w : prev));
-      }
+    const measure = () =>
+      Math.max(280, Math.floor(el.getBoundingClientRect().width));
+    setContainerW(measure());
+    const ro = new ResizeObserver(() => {
+      const w = measure();
+      setContainerW((prev) => (Math.abs(prev - w) > 1 ? w : prev));
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -1261,10 +1266,10 @@ function LivePriceChart({
         ) : (
           <svg
             viewBox={`0 0 ${dims.w} ${dims.h}`}
-            width="100%"
+            width={dims.w}
             height={dims.h}
-            preserveAspectRatio="none"
-            className="block"
+            preserveAspectRatio="xMinYMin meet"
+            className="block max-w-full"
           >
             {/* horizontal grid (full width including forecast zone) */}
             {[0.2, 0.4, 0.6, 0.8].map((f) => {

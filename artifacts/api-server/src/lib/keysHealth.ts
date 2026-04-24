@@ -84,15 +84,25 @@ function geminiKeyEntries(): { name: string; key: string }[] {
 }
 
 async function checkGeminiDirect(name: string, key: string): Promise<KeyHealth> {
-  // Use the REST endpoint with the explicit key so we test THIS key, not the
-  // pool. listModels is a free, unmetered endpoint — perfect for liveness.
+  // We probe the actual generation endpoint (gemini-2.5-flash:generateContent)
+  // with a tiny 1-token prompt. listModels was useless here because it's
+  // unmetered — keys would show "READY" even when their daily generation
+  // quota was fully exhausted, which is exactly the failure mode users hit
+  // when running ensemble predictions. A real ping costs 1 request per key
+  // per check (only triggered on startup and when the user clicks Re-check).
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 8000);
+  const t = setTimeout(() => ctrl.abort(), 12_000);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(key)}`;
   try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`,
-      { signal: ctrl.signal },
-    );
+    const res = await fetch(url, {
+      method: "POST",
+      signal: ctrl.signal,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "ping" }] }],
+        generationConfig: { maxOutputTokens: 1, temperature: 0 },
+      }),
+    });
     let body: string | undefined;
     if (!res.ok) body = (await res.text().catch(() => "")).slice(0, 400);
     const { state, ok } = classifyHttp(res.status, body);
