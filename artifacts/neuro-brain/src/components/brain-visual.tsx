@@ -213,6 +213,22 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
     );
     camera.position.set(0, 0.25, isMobile ? 4.4 : 3.8);
 
+    // Quick WebGL probe — bail to the 2D fallback before doing any heavy
+    // setup if the browser (e.g. PlayStation's stripped-down WebKit) can't
+    // create a context at all.
+    {
+      const probe = document.createElement("canvas");
+      const gl =
+        probe.getContext("webgl2") ||
+        probe.getContext("webgl") ||
+        probe.getContext("experimental-webgl");
+      if (!gl) {
+        console.warn("[BrainVisual] No WebGL context — using 2D fallback");
+        setWebglFailed(true);
+        return;
+      }
+    }
+
     let renderer: THREE.WebGLRenderer;
     try {
       renderer = new THREE.WebGLRenderer({
@@ -234,15 +250,40 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
     renderer.domElement.style.display = "block";
     renderer.domElement.style.touchAction = "none"; // prevent page-scroll while orbiting on mobile
 
-    const composer = new EffectComposer(renderer);
-    composer.addPass(new RenderPass(scene, camera));
-    const bloom = new UnrealBloomPass(
-      new THREE.Vector2(width, height),
-      isMobile ? 0.55 : 0.75,
-      0.4,
-      0.18,
-    );
-    composer.addPass(bloom);
+    // Bloom post-processing requires float render targets. Browsers like the
+    // PlayStation's WebKit can create a WebGL context but lack the
+    // `EXT_color_buffer_float` / `OES_texture_half_float` extensions, which
+    // makes UnrealBloomPass silently render black. Detect support and only
+    // enable the composer when it's safe.
+    let composer: EffectComposer | null = null;
+    try {
+      const gl = renderer.getContext();
+      const isWebGL2 = typeof WebGL2RenderingContext !== "undefined" &&
+        gl instanceof WebGL2RenderingContext;
+      const hasFloatTargets = isWebGL2
+        ? !!gl.getExtension("EXT_color_buffer_float") ||
+          !!gl.getExtension("EXT_color_buffer_half_float")
+        : !!gl.getExtension("OES_texture_half_float") &&
+          !!gl.getExtension("OES_texture_half_float_linear");
+      if (hasFloatTargets) {
+        composer = new EffectComposer(renderer);
+        composer.addPass(new RenderPass(scene, camera));
+        const bloom = new UnrealBloomPass(
+          new THREE.Vector2(width, height),
+          isMobile ? 0.55 : 0.75,
+          0.4,
+          0.18,
+        );
+        composer.addPass(bloom);
+      } else {
+        console.warn(
+          "[BrainVisual] Float render targets unsupported — disabling bloom",
+        );
+      }
+    } catch (err) {
+      console.warn("[BrainVisual] Bloom setup failed, rendering without it", err);
+      composer = null;
+    }
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
@@ -748,7 +789,11 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
       }
 
       controls.update();
-      composer.render();
+      if (composer) {
+        composer.render();
+      } else {
+        renderer.render(scene, camera);
+      }
     }
     animate();
 
@@ -766,7 +811,7 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
         camera.aspect = w / h;
         camera.updateProjectionMatrix();
         renderer.setSize(w, h);
-        composer.setSize(w, h);
+        composer?.setSize(w, h);
       }
     });
     ro.observe(container);
@@ -795,7 +840,7 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
       sigMat.dispose();
       neuronTex.dispose();
       haloTex.dispose();
-      composer.dispose();
+      composer?.dispose();
       renderer.dispose();
       if (renderer.domElement.parentElement === container) {
         container.removeChild(renderer.domElement);
