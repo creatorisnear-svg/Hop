@@ -1247,7 +1247,7 @@ function LivePriceChart({
           ))}
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="p-0 sm:p-6">
         <div ref={containerRef} className="w-full overflow-hidden" style={{ height: dims.h }}>
         {!view ? (
           <div className="w-full h-full flex items-center justify-center text-sm text-muted-foreground">
@@ -1521,7 +1521,7 @@ function LivePriceChart({
         )}
         </div>
         {prediction?.targetPrice && livePrice != null && (
-          <div className="mt-2 text-xs text-muted-foreground flex items-center gap-3 flex-wrap">
+          <div className="mt-2 px-3 sm:px-0 text-xs text-muted-foreground flex items-center gap-3 flex-wrap">
             <span>
               Live projection · target {horizon}:{" "}
               <span className="font-mono text-foreground">{fmtPrice(prediction.targetPrice)}</span>
