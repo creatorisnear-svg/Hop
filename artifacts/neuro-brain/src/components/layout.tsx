@@ -15,6 +15,7 @@ interface LayoutProps {
 const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/jarvis", label: "Jarvis", icon: Bot },
+  { href: "/brain", label: "Live Brain", icon: Brain },
   { href: "/run/new", label: "New Run", icon: Play },
   { href: "/runs", label: "Runs History", icon: Activity },
   { href: "/synapses", label: "Synapses", icon: Zap },

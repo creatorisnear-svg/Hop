@@ -154,12 +154,15 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
   // Map of "from->to" -> learned synapse strength (0..1). Read live by the
   // animation loop to weight edge brightness and pulse-spawning probability.
   const synStrengthRef = useRef<Record<string, number>>({});
+  // Set inside the three.js mount effect; lets the synapses effect inject
+  // brand-new edges into the scene as the brain learns them in real time.
+  const addEdgeRef = useRef<((a: string, b: string) => void) | null>(null);
   const [webglFailed, setWebglFailed] = useState(false);
 
   // Pull learned synapse strengths from the backend; refresh while a run is
   // active so newly reinforced pathways light up without a page reload.
   const { data: synapsesData } = useListSynapses({
-    query: { refetchInterval: activeRegion ? 4000 : 30000 },
+    query: { refetchInterval: activeRegion ? 2500 : 15000 },
   });
   useEffect(() => {
     const map: Record<string, number> = {};
@@ -167,6 +170,14 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
       map[`${s.fromRegion}->${s.toRegion}`] = s.strength;
     }
     synStrengthRef.current = map;
+    // Inject any new pairs into the live scene so freshly-learned synapses
+    // appear as actual geometry without needing a reload.
+    const add = addEdgeRef.current;
+    if (add) {
+      for (const s of synapsesData ?? []) {
+        add(s.fromRegion, s.toRegion);
+      }
+    }
   }, [synapsesData]);
 
   // keep the latest activeRegion accessible inside the animation loop
@@ -448,6 +459,10 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
     }
     scene.add(lineGroup);
 
+    // Expose addEdge so the synapses effect can inject newly-learned pairs
+    // into the live scene without a remount.
+    addEdgeRef.current = addEdge;
+
     function edgeStrength(a: string, b: string): number {
       const m = synStrengthRef.current;
       return Math.max(m[`${a}->${b}`] ?? 0, m[`${b}->${a}`] ?? 0);
@@ -718,6 +733,7 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
 
     return () => {
       mounted = false;
+      addEdgeRef.current = null;
       cancelAnimationFrame(raf);
       ro.disconnect();
       renderer.domElement.removeEventListener("dblclick", onDblClick);
