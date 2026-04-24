@@ -859,10 +859,25 @@ function WatchDetail({ watch }: { watch: Watch }) {
                 variant={autoPredict ? "default" : "outline"}
                 size="sm"
                 onClick={() => setAutoPredict((v) => !v)}
-                className="shrink-0"
-                title="Re-run the AI prediction every 60 seconds in the background"
+                className={`shrink-0 ${autoPredict ? "bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-500" : "text-muted-foreground"}`}
+                title={autoPredict
+                  ? "Auto-predict is ON — re-runs every 3 minutes in the background. Click to turn OFF."
+                  : "Auto-predict is OFF — predictions only run when you press Predict. Click to turn ON."}
               >
-                Auto {autoPredict ? "ON" : "OFF"}
+                {autoPredict ? (
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="relative inline-flex h-2 w-2">
+                      <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-200 opacity-75 animate-ping" />
+                      <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
+                    </span>
+                    Auto ON
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 opacity-80">
+                    <span className="inline-block h-2 w-2 rounded-full bg-muted-foreground/50" />
+                    Auto OFF
+                  </span>
+                )}
               </Button>
               <Button variant="ghost" size="icon" onClick={() => void load()} className="shrink-0">
                 <RefreshCw className="w-4 h-4" />
@@ -1152,6 +1167,18 @@ function LivePriceChart({
     startClientX: number;
     startT0: number;
     startT1: number;
+    width: number;
+  } | null>(null);
+  // Active two-finger pinch session — only set during a multi-touch gesture.
+  // Stored separately from panRef so that going from 1 finger (pan) → 2 fingers
+  // (pinch) cleanly hands off without snapping back. Pinch always wins over
+  // pan when ≥2 touches are on screen.
+  const pinchRef = useRef<{
+    startDistance: number;
+    startSpan: number;
+    startT0: number;
+    startT1: number;
+    centerT: number;
     width: number;
   } | null>(null);
   // Reset zoom when the user changes the range selector (1D / 5D / 1M / etc.)
@@ -1498,6 +1525,78 @@ function LivePriceChart({
                 panRef.current = null;
                 e.currentTarget.style.cursor = view?.isZoomed ? "grab" : "default";
               }
+            }}
+            onTouchStart={(e) => {
+              if (!view) return;
+              // Pinch-to-zoom: requires two fingers. The chart's `touch-none`
+              // CSS class disables the browser's default pinch (page zoom),
+              // so we get clean two-finger gesture data with no interference.
+              if (e.touches.length === 2) {
+                // Cancel any single-finger pan that started a moment ago — the
+                // user is now pinching, not panning.
+                panRef.current = null;
+                const t1 = e.touches[0];
+                const t2 = e.touches[1];
+                const dx = t2.clientX - t1.clientX;
+                const dy = t2.clientY - t1.clientY;
+                const dist = Math.hypot(dx, dy);
+                const midX = (t1.clientX + t2.clientX) / 2;
+                const rect = e.currentTarget.getBoundingClientRect();
+                const cssX = midX - rect.left;
+                const svgX = (cssX / Math.max(rect.width, 1)) * dims.w;
+                const centerT = view.tOfX(svgX);
+                const cur = view.isZoomed
+                  ? { t0: view.effT0, t1: view.effT1 }
+                  : { t0: view.fullTMin, t1: view.fullTMax };
+                pinchRef.current = {
+                  startDistance: Math.max(dist, 1),
+                  startSpan: cur.t1 - cur.t0,
+                  startT0: cur.t0,
+                  startT1: cur.t1,
+                  centerT,
+                  width: rect.width,
+                };
+              }
+            }}
+            onTouchMove={(e) => {
+              const p = pinchRef.current;
+              if (!p || !view || e.touches.length < 2) return;
+              const t1 = e.touches[0];
+              const t2 = e.touches[1];
+              const dx = t2.clientX - t1.clientX;
+              const dy = t2.clientY - t1.clientY;
+              const dist = Math.max(Math.hypot(dx, dy), 1);
+              // Larger finger spread = zoom in (smaller time span).
+              const scale = dist / p.startDistance;
+              let newSpan = p.startSpan / scale;
+              const fullSpan = view.fullTMax - view.fullTMin;
+              if (newSpan >= fullSpan * 0.98) {
+                setZoomWindow(null);
+                return;
+              }
+              if (newSpan < 60_000) newSpan = 60_000; // 1-min minimum window
+
+              // Anchor the zoom so the original "pinched-on" time stays under
+              // the current midpoint of the two fingers — this is what makes
+              // pinch zoom feel natural instead of drifty.
+              const midX = (t1.clientX + t2.clientX) / 2;
+              const rect = e.currentTarget.getBoundingClientRect();
+              const cssX = midX - rect.left;
+              const svgX = (cssX / Math.max(rect.width, 1)) * dims.w;
+              const ratio = (svgX - view.x0) / Math.max(view.x1 - view.x0, 1);
+              let nt0 = p.centerT - ratio * newSpan;
+              let nt1 = nt0 + newSpan;
+              if (nt0 < view.fullTMin) { nt1 += view.fullTMin - nt0; nt0 = view.fullTMin; }
+              if (nt1 > view.fullTMax) { nt0 -= nt1 - view.fullTMax; nt1 = view.fullTMax; }
+              setZoomWindow({ t0: nt0, t1: nt1 });
+            }}
+            onTouchEnd={(e) => {
+              if (e.touches.length < 2) {
+                pinchRef.current = null;
+              }
+            }}
+            onTouchCancel={() => {
+              pinchRef.current = null;
             }}
           >
             {/* horizontal grid (full width including forecast zone) */}

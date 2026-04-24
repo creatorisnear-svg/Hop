@@ -931,10 +931,14 @@ B. Pick direction from the SUM (positive → BULLISH, negative → BEARISH, |sum
 C. Confidence = clamp(0.4 + 0.1*|sum| + 0.05*(news_signal_strength), 0, 0.95).
    Lower confidence whenever signals contradict each other.
 D. Compute targetPrice with this formula, NOT a guess:
-     expected_pct ≈ direction_sign * confidence * min(20, k * volatility20d * sqrt(horizon_days/20))
+     expected_pct ≈ direction_sign * confidence * min(MAX_PCT, k * volatility20d * sqrt(horizon_days/20))
    where k = 1.0 for stocks/ETFs, 1.5 for crypto/forex/index, horizon_days as listed below,
-   then round to a clean number near the live quote. Cap |expected_pct| ≤ 20%.
+   then round to a clean number near the live quote.
    Horizon → days: "1d"=1, "1w"=5, "2w"=10, "1m"=21, "3m"=63.
+   Horizon → MAX_PCT cap (HARD CEILING): "1d"=4, "1w"=8, "2w"=12, "1m"=18, "3m"=25.
+   A 20% intraday move is an outlier event — do NOT predict that for a "1d" horizon
+   no matter how confident you feel; cap at 4% for 1d. This calibrates targets to
+   the actual statistical distribution of moves at each horizon.
 E. Translate to options signal:
    - BUY_CALL when BULLISH and confidence ≥ 0.55
    - BUY_PUT when BEARISH and confidence ≥ 0.55
@@ -1270,17 +1274,33 @@ Rules:
     if (action === "BUY_CALL" && direction !== "BULLISH") action = "HOLD";
     if (action === "BUY_PUT" && direction !== "BEARISH") action = "HOLD";
 
-    // Sanity-clip targetPrice to ±20% of live quote so a hallucination doesn't
-    // distort the forecast chart.
+    // Horizon-aware sanity cap on targetPrice. The previous flat ±20% cap was
+    // way too generous for short horizons — a 20% intraday move is a once-a-year
+    // event for most names. These caps reflect the actual statistical envelope
+    // for each horizon (≈ 3-sigma at typical equity vol). Anything outside is
+    // almost certainly a model hallucination, so we trim it back instead of
+    // letting it distort the forecast chart and the option-trade signal.
+    const HORIZON_TARGET_CAP: Record<string, number> = {
+      "1d":  0.04,   // ±4% intraday  (≈ 2-3σ on a 1.5% daily-vol stock)
+      "1w":  0.08,   // ±8% in a week
+      "2w":  0.12,   // ±12% in two weeks
+      "1m":  0.18,   // ±18% in a month
+      "3m":  0.25,   // ±25% in three months
+    };
+    const cap = HORIZON_TARGET_CAP[args.horizon] ?? 0.18;
     if (targetPrice && quote?.price) {
       const move = (targetPrice - quote.price) / quote.price;
-      if (move > 0.2) targetPrice = quote.price * 1.2;
-      if (move < -0.2) targetPrice = quote.price * 0.8;
+      if (move >  cap) targetPrice = quote.price * (1 + cap);
+      if (move < -cap) targetPrice = quote.price * (1 - cap);
     }
     // Fallback: derive a target from direction + confidence if model omitted it.
+    // Scaled by realistic per-horizon move expectations so the synthetic target
+    // is also calibrated, not arbitrary.
     if (!targetPrice && quote?.price) {
-      const horizonScale: Record<string, number> = { "1d": 0.005, "1w": 0.02, "1m": 0.05, "3m": 0.1 };
-      const base = horizonScale[args.horizon] ?? 0.02;
+      const horizonScale: Record<string, number> = {
+        "1d": 0.012, "1w": 0.025, "2w": 0.04, "1m": 0.06, "3m": 0.10,
+      };
+      const base = horizonScale[args.horizon] ?? 0.025;
       const magnitude = base * (0.5 + confidence);
       if (direction === "BULLISH") targetPrice = quote.price * (1 + magnitude);
       else if (direction === "BEARISH") targetPrice = quote.price * (1 - magnitude);
