@@ -461,9 +461,16 @@ reg({
 });
 
 // ----- Autonomous (GitHub + Koyeb) -----
-// These delegate to the agent tool registry, which audits every call to the
-// jarvis_actions table and enforces the JARVIS_AUTONOMY kill switch.
-const AUTONOMY_TOOLS: Array<{ name: string; description: string; parameters: Record<string, unknown> }> = [
+// These tool stubs are intentionally NOT registered with Jarvis-chat. Every
+// autonomous action must flow through a brain run (start_run), so the 6-region
+// pipeline plans it, motor_cortex executes the underlying agent tool, and the
+// other regions verify and synthesize. Direct chat-tool execution is disabled
+// on purpose — that was the whole point of "all his actions go through the
+// brain".
+//
+// The actual GitHub/Koyeb tools are registered in tools/autonomy.ts under the
+// agent tool registry and ARE visible to the brain planner.
+const _AUTONOMY_TOOLS_DOCS_ONLY: Array<{ name: string; description: string; parameters: Record<string, unknown> }> = [
   {
     name: "github_list_commits",
     description: "List the most recent commits on the configured repo branch. Use to check what's deployed or to verify a commit landed.",
@@ -591,18 +598,8 @@ const AUTONOMY_TOOLS: Array<{ name: string; description: string; parameters: Rec
   },
 ];
 
-for (const t of AUTONOMY_TOOLS) {
-  reg({
-    name: t.name,
-    description: t.description,
-    parameters: t.parameters,
-    async run(args) {
-      const result = await invokeTool(t.name, args);
-      if (!result.ok) throw new Error(result.error ?? "tool failed");
-      return result.result;
-    },
-  });
-}
+// Touch the docs-only array so TS doesn't warn about it being unused.
+void _AUTONOMY_TOOLS_DOCS_ONLY;
 
 export function listJarvisTools(): JarvisTool[] {
   return [...tools];
