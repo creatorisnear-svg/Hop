@@ -25,6 +25,7 @@ export const marketPredictionsTable = pgTable("market_predictions", {
   expiryHint: text("expiry_hint").notNull().default(""),
   entryTrigger: text("entry_trigger").notNull().default(""),
   riskNote: text("risk_note").notNull().default(""),
+  targetPrice: real("target_price"),
   model: text("model").notNull().default(""),
   durationMs: integer("duration_ms").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

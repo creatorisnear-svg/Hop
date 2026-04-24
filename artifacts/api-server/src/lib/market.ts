@@ -32,8 +32,24 @@ export interface PredictionResult {
   expiryHint: string;
   entryTrigger: string;
   riskNote: string;
+  targetPrice: number | null;
   model: string;
   durationMs: number;
+}
+
+export interface CandlePoint {
+  t: number;
+  c: number;
+}
+
+export interface CandleSeries {
+  symbol: string;
+  interval: string;
+  range: string;
+  currency: string | null;
+  marketState: string | null;
+  previousClose: number | null;
+  candles: CandlePoint[];
 }
 
 const MODEL = "gemini-2.5-flash";
@@ -103,6 +119,68 @@ export async function fetchHeadlines(query: string): Promise<NewsHeadline[]> {
   } catch (err) {
     logger.warn({ err, query }, "headline fetch error");
     return [];
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+export async function fetchYahooCandles(
+  symbol: string,
+  interval: string = "5m",
+  range: string = "1d",
+): Promise<CandleSeries | null> {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+    symbol,
+  )}?interval=${encodeURIComponent(interval)}&range=${encodeURIComponent(range)}`;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 10_000);
+  try {
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: { "user-agent": "Mozilla/5.0 NeuroLinkedBrain/1.0" },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      chart?: {
+        result?: Array<{
+          meta?: {
+            symbol?: string;
+            currency?: string;
+            marketState?: string;
+            chartPreviousClose?: number;
+            previousClose?: number;
+          };
+          timestamp?: number[];
+          indicators?: { quote?: Array<{ close?: (number | null)[] }> };
+        }>;
+      };
+    };
+    const r = data.chart?.result?.[0];
+    if (!r || !r.timestamp) return null;
+    const closes = r.indicators?.quote?.[0]?.close ?? [];
+    const candles: CandlePoint[] = [];
+    for (let i = 0; i < r.timestamp.length; i++) {
+      const c = closes[i];
+      if (typeof c === "number" && Number.isFinite(c)) {
+        candles.push({ t: r.timestamp[i] * 1000, c });
+      }
+    }
+    return {
+      symbol: r.meta?.symbol ?? symbol,
+      interval,
+      range,
+      currency: r.meta?.currency ?? null,
+      marketState: r.meta?.marketState ?? null,
+      previousClose:
+        typeof r.meta?.chartPreviousClose === "number"
+          ? r.meta.chartPreviousClose
+          : typeof r.meta?.previousClose === "number"
+            ? r.meta.previousClose
+            : null,
+      candles,
+    };
+  } catch {
+    return null;
   } finally {
     clearTimeout(t);
   }
@@ -244,6 +322,7 @@ Respond with STRICT JSON only, matching this shape:
   "expiryHint": "<expiry that matches the horizon, e.g. 'weekly Fri exp' or '30-45 DTE'>",
   "entryTrigger": "<one short observable condition to enter>",
   "riskNote": "<one short sentence on what would invalidate the trade>",
+  "targetPrice": <number — your projected price for the asset at the END of the horizon, used to draw a forecast line on the chart>,
   "summary": "<one-sentence punchy verdict>",
   "reasoning": "<3-6 sentences citing the headlines by [n] when possible>"
 }
@@ -251,7 +330,8 @@ Respond with STRICT JSON only, matching this shape:
 Rules:
 - If confidence < 0.55, action MUST be "HOLD".
 - BUY_CALL only with BULLISH direction, BUY_PUT only with BEARISH.
-- Do not invent exact prices — base strike hints on the live quote shown.
+- Do not invent the strike price — base strike hints on the live quote shown.
+- targetPrice MUST be a realistic dollar number near the live quote (typical move 0.5%-8%, never more than 20%).
 - No prose outside the JSON.`;
 
   let direction: "BULLISH" | "BEARISH" | "NEUTRAL" = "NEUTRAL";
@@ -263,6 +343,7 @@ Rules:
   let expiryHint = "";
   let entryTrigger = "";
   let riskNote = "";
+  let targetPrice: number | null = null;
 
   try {
     const resp = await ai.models.generateContent({
@@ -299,6 +380,8 @@ Rules:
       if (typeof parsed.expiryHint === "string") expiryHint = parsed.expiryHint.trim();
       if (typeof parsed.entryTrigger === "string") entryTrigger = parsed.entryTrigger.trim();
       if (typeof parsed.riskNote === "string") riskNote = parsed.riskNote.trim();
+      const tp = Number(parsed.targetPrice);
+      if (Number.isFinite(tp) && tp > 0) targetPrice = tp;
     } else {
       // Truncated / malformed JSON — recover the fields with regex.
       const dirM = text.match(/"direction"\s*:\s*"([A-Z_]+)"/i);
@@ -316,12 +399,34 @@ Rules:
       riskNote = grabStr("riskNote") || riskNote;
       summary = grabStr("summary") || summary;
       reasoning = grabStr("reasoning") || text.slice(0, 4000);
+      const tpM = text.match(/"targetPrice"\s*:\s*([0-9.]+)/);
+      if (tpM) {
+        const tp = Number(tpM[1]);
+        if (Number.isFinite(tp) && tp > 0) targetPrice = tp;
+      }
     }
 
     // Safety: enforce the rules the model is supposed to follow itself.
     if (confidence < 0.55) action = "HOLD";
     if (action === "BUY_CALL" && direction !== "BULLISH") action = "HOLD";
     if (action === "BUY_PUT" && direction !== "BEARISH") action = "HOLD";
+
+    // Sanity-clip targetPrice to ±20% of live quote so a hallucination doesn't
+    // distort the forecast chart.
+    if (targetPrice && quote?.price) {
+      const move = (targetPrice - quote.price) / quote.price;
+      if (move > 0.2) targetPrice = quote.price * 1.2;
+      if (move < -0.2) targetPrice = quote.price * 0.8;
+    }
+    // Fallback: derive a target from direction + confidence if model omitted it
+    if (!targetPrice && quote?.price) {
+      const horizonScale: Record<string, number> = { "1d": 0.005, "1w": 0.02, "1m": 0.05, "3m": 0.1 };
+      const base = horizonScale[args.horizon] ?? 0.02;
+      const magnitude = base * (0.5 + confidence);
+      if (direction === "BULLISH") targetPrice = quote.price * (1 + magnitude);
+      else if (direction === "BEARISH") targetPrice = quote.price * (1 - magnitude);
+      else targetPrice = quote.price;
+    }
   } catch (err) {
     logger.error({ err, symbol: args.symbol }, "market prediction failed");
     throw err instanceof Error ? err : new Error(String(err));
@@ -340,6 +445,7 @@ Rules:
     expiryHint,
     entryTrigger,
     riskNote,
+    targetPrice,
     model: MODEL,
     durationMs: Date.now() - start,
   };

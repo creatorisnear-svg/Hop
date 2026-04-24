@@ -3,7 +3,13 @@ import { randomUUID } from "node:crypto";
 import { db, marketWatchesTable, marketPredictionsTable } from "@workspace/db";
 import { desc, eq } from "drizzle-orm";
 import { logger } from "../lib/logger";
-import { predictMarket, fetchYahooQuote } from "../lib/market";
+import { predictMarket, fetchYahooQuote, fetchYahooCandles } from "../lib/market";
+
+// Tiny in-memory caches so a 1-second client poll doesn't hammer Yahoo.
+const quoteCache = new Map<string, { ts: number; data: unknown }>();
+const candleCache = new Map<string, { ts: number; data: unknown }>();
+const QUOTE_TTL_MS = 1500;
+const CANDLE_TTL_MS = 30_000;
 
 const router: IRouter = Router();
 
@@ -97,6 +103,7 @@ router.post("/market/watches/:id/predict", async (req, res) => {
         expiryHint: result.expiryHint,
         entryTrigger: result.entryTrigger,
         riskNote: result.riskNote,
+        targetPrice: result.targetPrice,
         model: result.model,
         durationMs: result.durationMs,
       })
@@ -110,9 +117,32 @@ router.post("/market/watches/:id/predict", async (req, res) => {
 });
 
 router.get("/market/quote/:symbol", async (req, res) => {
-  const quote = await fetchYahooQuote(req.params.symbol.toUpperCase());
+  const symbol = req.params.symbol.toUpperCase();
+  const now = Date.now();
+  const hit = quoteCache.get(symbol);
+  if (hit && now - hit.ts < QUOTE_TTL_MS) {
+    return res.json({ quote: hit.data });
+  }
+  const quote = await fetchYahooQuote(symbol);
   if (!quote) return res.status(404).json({ error: "quote unavailable" });
+  quoteCache.set(symbol, { ts: now, data: quote });
   res.json({ quote });
+});
+
+router.get("/market/candles/:symbol", async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  const interval = String(req.query.interval ?? "5m");
+  const range = String(req.query.range ?? "1d");
+  const cacheKey = `${symbol}|${interval}|${range}`;
+  const now = Date.now();
+  const hit = candleCache.get(cacheKey);
+  if (hit && now - hit.ts < CANDLE_TTL_MS) {
+    return res.json({ series: hit.data });
+  }
+  const series = await fetchYahooCandles(symbol, interval, range);
+  if (!series) return res.status(404).json({ error: "candles unavailable" });
+  candleCache.set(cacheKey, { ts: now, data: series });
+  res.json({ series });
 });
 
 export default router;
