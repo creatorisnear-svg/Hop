@@ -1090,7 +1090,10 @@ Rules:
   const ensemble = Math.max(1, Math.min(5, args.ensemble ?? 1));
   const temps = [0.1, 0.25, 0.4, 0.55, 0.7].slice(0, ensemble);
 
-  // Helper: fire one model call and parse it. Does NOT throw — returns null on failure.
+  // Helper: fire one model call and parse it. Captures the underlying error
+  // string so we can surface a meaningful message if the entire ensemble
+  // fails (instead of a generic "rate-limited" guess).
+  const errors: string[] = [];
   const callModel = async (temperature: number): Promise<ParsedRun | null> => {
     try {
       const res = await ai.models.generateContent({
@@ -1103,14 +1106,14 @@ Rules:
       const text = (res.text ?? "").trim();
       if (!text) {
         logger.warn({ symbol: args.symbol, temperature }, "ensemble run returned empty response");
+        errors.push("empty response");
         return null;
       }
       return parseRun(text);
     } catch (err) {
-      logger.warn(
-        { err: err instanceof Error ? err.message : String(err), symbol: args.symbol, temperature },
-        "ensemble run failed",
-      );
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn({ err: msg, symbol: args.symbol, temperature }, "ensemble run failed");
+      errors.push(msg.slice(0, 200));
       return null;
     }
   };
@@ -1130,10 +1133,17 @@ Rules:
   }
 
   if (runs.length === 0) {
+    const allRateLimited =
+      errors.length > 0 && errors.every((e) => /\b(429|quota|rate.?limit|RESOURCE_EXHAUSTED)\b/i.test(e));
+    const sample = errors[0] ?? "unknown error";
+    if (allRateLimited) {
+      throw new Error(
+        `All Gemini keys are currently rate-limited for ${args.symbol}. The pool will recover automatically as per-minute quota resets (≈60s). ` +
+        `If this persists, check the API Keys page to see which keys are exhausted, or add more keys via GEMINI_API_KEY_2..GEMINI_API_KEY_20.`,
+      );
+    }
     throw new Error(
-      `Prediction failed: the AI model could not be reached for ${args.symbol}. ` +
-      `This usually means the API key is rate-limited or the model is temporarily unavailable. ` +
-      `Please wait a moment and try again.`,
+      `Prediction failed for ${args.symbol}: ${sample}`,
     );
   }
 

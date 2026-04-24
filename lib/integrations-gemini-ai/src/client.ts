@@ -17,7 +17,7 @@ const directKeys = loadDirectKeys();
 
 if (directKeys.length === 0 && (!replitBaseUrl || !replitApiKey)) {
   throw new Error(
-    "Gemini credentials missing. Set GEMINI_API_KEY (and optionally GEMINI_API_KEY_2..GEMINI_API_KEY_10) for direct Google AI keys, or both AI_INTEGRATIONS_GEMINI_BASE_URL and AI_INTEGRATIONS_GEMINI_API_KEY for Replit AI Integrations.",
+    "Gemini credentials missing. Set GEMINI_API_KEY (and optionally GEMINI_API_KEY_2..GEMINI_API_KEY_20) for direct Google AI keys, or both AI_INTEGRATIONS_GEMINI_BASE_URL and AI_INTEGRATIONS_GEMINI_API_KEY for Replit AI Integrations.",
   );
 }
 
@@ -31,6 +31,8 @@ const pool: GoogleGenAI[] =
         }),
       ];
 
+const COOLDOWN_MS = 60_000;
+const cooldownUntil: number[] = pool.map(() => 0);
 let cursor = 0;
 
 export function geminiKeyCount(): number {
@@ -41,82 +43,90 @@ export function geminiUsesDirectKeys(): boolean {
   return directKeys.length > 0;
 }
 
+export function geminiPoolStatus(): { index: number; cooldownMs: number }[] {
+  const now = Date.now();
+  return cooldownUntil.map((t, i) => ({ index: i, cooldownMs: Math.max(0, t - now) }));
+}
+
+function pickClient(): { client: GoogleGenAI; index: number } {
+  const now = Date.now();
+  for (let i = 0; i < pool.length; i++) {
+    const idx = (cursor + i) % pool.length;
+    if (cooldownUntil[idx] <= now) {
+      cursor = (idx + 1) % pool.length;
+      return { client: pool[idx], index: idx };
+    }
+  }
+  let bestIdx = 0;
+  let bestT = cooldownUntil[0];
+  for (let i = 1; i < pool.length; i++) {
+    if (cooldownUntil[i] < bestT) {
+      bestT = cooldownUntil[i];
+      bestIdx = i;
+    }
+  }
+  cursor = (bestIdx + 1) % pool.length;
+  return { client: pool[bestIdx], index: bestIdx };
+}
+
 export function getAi(): GoogleGenAI {
-  const client = pool[cursor % pool.length];
-  cursor = (cursor + 1) % pool.length;
-  return client;
+  return pickClient().client;
 }
 
 function isRateLimitError(err: unknown): boolean {
   if (!err) return false;
   const msg = err instanceof Error ? err.message : String(err);
-  return /\b(429|quota|rate.?limit|RESOURCE_EXHAUSTED)\b/i.test(msg);
+  if (/\b(429|quota|rate.?limit|RESOURCE_EXHAUSTED|exceeded)\b/i.test(msg)) return true;
+  const status = (err as { status?: number; code?: number }).status ?? (err as { code?: number }).code;
+  return status === 429;
 }
 
-/**
- * Wrap a method on the Gemini client so that if the call fails with a 429 /
- * quota error we transparently rotate to the next API key and retry, up to
- * `pool.length - 1` more times. This means a mid-conversation rate-limit hit
- * just slides over to the next key with the full request body intact (Gemini
- * is stateless — the conversation history is in the request body).
- */
-function wrapRetry<F extends (...args: any[]) => Promise<any>>(fn: F, owner: any): F {
-  return (async (...args: any[]) => {
-    let lastErr: unknown;
-    const maxAttempts = Math.max(1, pool.length);
-    for (let i = 0; i < maxAttempts; i++) {
-      try {
-        return await fn.apply(owner, args);
-      } catch (err) {
-        lastErr = err;
-        if (!isRateLimitError(err) || i === maxAttempts - 1) throw err;
-        // Rotate to next key by rebinding fn to the next client's same path
-        const next = getAi();
-        // Re-resolve fn on the next client, walking the same property path we
-        // were originally called on — but since the proxy below resolves fresh
-        // each call, easiest is to just rethrow if we can't, and let proxy
-        // pick a new client for the next caller. For chained methods like
-        // `ai.models.generateContent` we need to re-traverse `models` on the
-        // new client.
-        if ((owner as any)?.__path) {
-          let target: any = next;
-          for (const seg of (owner as any).__path) target = target?.[seg];
-          owner = target;
-          fn = target?.[(fn as any).__name]?.bind(target) ?? fn;
-        } else {
-          // Top-level method on the client
-          const name = (fn as any).__name;
-          if (name && typeof (next as any)[name] === "function") {
-            fn = (next as any)[name].bind(next);
-          }
-        }
-      }
+async function callWithRotation(path: string[], args: unknown[]): Promise<unknown> {
+  if (pool.length === 0) throw new Error("Gemini pool is empty");
+  let lastErr: unknown;
+  const attempts = Math.max(1, pool.length);
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const { client, index } = pickClient();
+    let target: unknown = client;
+    for (let i = 0; i < path.length - 1; i++) {
+      target = (target as Record<string, unknown>)?.[path[i]];
     }
-    throw lastErr;
-  }) as F;
+    const fnName = path[path.length - 1];
+    const fn = (target as Record<string, unknown>)?.[fnName];
+    if (typeof fn !== "function") {
+      throw new Error(`Gemini client method not found: ${path.join(".")}`);
+    }
+    try {
+      return await (fn as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+    } catch (err) {
+      lastErr = err;
+      if (!isRateLimitError(err)) throw err;
+      cooldownUntil[index] = Date.now() + COOLDOWN_MS;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[gemini] key #${index + 1} rate-limited; cooling down ${COOLDOWN_MS / 1000}s — rotating to next key (attempt ${attempt + 1}/${attempts})`,
+      );
+    }
+  }
+  throw lastErr;
 }
 
-function makeProxy(client: GoogleGenAI, path: string[] = []): GoogleGenAI {
-  return new Proxy(client, {
-    get(target, prop, receiver) {
-      const value = Reflect.get(target as object, prop, receiver);
-      if (typeof value === "function") {
-        const bound = value.bind(target);
-        (bound as any).__name = prop;
-        (target as any).__path = path;
-        return wrapRetry(bound as any, target);
-      }
-      if (value && typeof value === "object") {
-        return makeProxy(value as any, [...path, String(prop)]);
-      }
-      return value;
+function makeAccessor(path: string[]): unknown {
+  const fn = function () {} as unknown as object;
+  return new Proxy(fn, {
+    get(_t, prop) {
+      if (typeof prop === "symbol") return undefined;
+      return makeAccessor([...path, String(prop)]);
     },
-  }) as GoogleGenAI;
+    apply(_t, _thisArg, args) {
+      return callWithRotation(path, args);
+    },
+  });
 }
 
 export const ai: GoogleGenAI = new Proxy({} as GoogleGenAI, {
   get(_target, prop) {
-    const client = getAi();
-    return (makeProxy(client) as any)[prop];
+    if (typeof prop === "symbol") return undefined;
+    return makeAccessor([String(prop)]);
   },
 }) as GoogleGenAI;
