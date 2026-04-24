@@ -19,10 +19,27 @@ export interface IndicatorsResult {
   change1m: number | null;
   sma20: number | null;
   sma50: number | null;
+  ema12: number | null;
+  ema26: number | null;
   rsi14: number | null;
+  // MACD trio (12/26/9)
+  macd: number | null;
+  macdSignal: number | null;
+  macdHist: number | null;
+  // Bollinger Bands (20-period, 2 stddev)
+  bbUpper: number | null;
+  bbLower: number | null;
+  bbMid: number | null;
+  bbWidthPct: number | null;        // (upper-lower)/mid * 100
+  // Stochastic %K (14)
+  stochK14: number | null;
+  // Average true range (14) — but we only have closes, so use close-based proxy.
+  atr14Pct: number | null;          // mean abs daily return * 100, last 14 days
   high52w: number | null;
   low52w: number | null;
   volatility20d: number | null;
+  // Multi-timeframe trend agreement scoring (-3..+3)
+  trendScore: number | null;
   asOf: string;
 }
 
@@ -647,6 +664,11 @@ export interface PredictArgs {
   market: string;
   horizon: string;
   notes?: string;
+  // Ensemble runs (default 1). When >1 we call the model multiple times in
+  // parallel with slightly different temperatures and majority-vote the
+  // direction + average targetPrice/confidence — significantly tighter
+  // than a single-shot call.
+  ensemble?: number;
 }
 
 function indicatorsBlock(ind: IndicatorsResult | null): string {
@@ -658,9 +680,40 @@ function indicatorsBlock(ind: IndicatorsResult | null): string {
   if (ind.change1m != null) lines.push(`1m change: ${ind.change1m.toFixed(2)}%`);
   if (ind.sma20 != null) lines.push(`SMA20: ${ind.sma20.toFixed(2)} (price ${ind.price > ind.sma20 ? "above" : "below"})`);
   if (ind.sma50 != null) lines.push(`SMA50: ${ind.sma50.toFixed(2)} (price ${ind.price > ind.sma50 ? "above" : "below"})`);
+  if (ind.ema12 != null && ind.ema26 != null) {
+    lines.push(`EMA12/26: ${ind.ema12.toFixed(2)} / ${ind.ema26.toFixed(2)} (${ind.ema12 > ind.ema26 ? "bull cross" : "bear cross"})`);
+  }
+  if (ind.macd != null && ind.macdSignal != null && ind.macdHist != null) {
+    const macdTag = ind.macdHist > 0
+      ? (ind.macd > 0 ? "bullish momentum" : "bullish recovery")
+      : (ind.macd < 0 ? "bearish momentum" : "bearish weakening");
+    lines.push(`MACD(12,26,9): macd ${ind.macd.toFixed(3)} · signal ${ind.macdSignal.toFixed(3)} · hist ${ind.macdHist >= 0 ? "+" : ""}${ind.macdHist.toFixed(3)} (${macdTag})`);
+  }
+  if (ind.bbUpper != null && ind.bbLower != null && ind.bbMid != null) {
+    const pos = ind.bbUpper !== ind.bbLower
+      ? ((ind.price - ind.bbLower) / (ind.bbUpper - ind.bbLower)) * 100 : 50;
+    const tag = pos >= 100 ? "above upper band (overbought)"
+      : pos <= 0 ? "below lower band (oversold)"
+      : pos >= 80 ? "near upper band"
+      : pos <= 20 ? "near lower band"
+      : "mid-band";
+    lines.push(`Bollinger(20,2): ${ind.bbLower.toFixed(2)} · ${ind.bbMid.toFixed(2)} · ${ind.bbUpper.toFixed(2)} — width ${ind.bbWidthPct?.toFixed(1)}% — price at ${pos.toFixed(0)}% (${tag})`);
+  }
+  if (ind.stochK14 != null) {
+    const stochTag = ind.stochK14 >= 80 ? "overbought" : ind.stochK14 <= 20 ? "oversold" : "neutral";
+    lines.push(`Stoch %K(14): ${ind.stochK14.toFixed(1)} (${stochTag})`);
+  }
+  if (ind.atr14Pct != null) lines.push(`ATR-proxy(14): ${ind.atr14Pct.toFixed(2)}% avg daily move`);
   if (ind.rsi14 != null) {
     const rsiTag = ind.rsi14 >= 70 ? "overbought" : ind.rsi14 <= 30 ? "oversold" : "neutral";
     lines.push(`RSI14: ${ind.rsi14.toFixed(1)} (${rsiTag})`);
+  }
+  if (ind.trendScore != null) {
+    const tag = ind.trendScore >= 2 ? "strong uptrend"
+      : ind.trendScore <= -2 ? "strong downtrend"
+      : ind.trendScore > 0 ? "mild uptrend"
+      : ind.trendScore < 0 ? "mild downtrend" : "no trend";
+    lines.push(`Multi-timeframe trend score (sma 20/50/200): ${ind.trendScore >= 0 ? "+" : ""}${ind.trendScore} (${tag})`);
   }
   if (ind.high52w != null && ind.low52w != null) {
     const pos = ind.high52w !== ind.low52w
@@ -805,44 +858,34 @@ Rules:
 - Reasoning must mention at least 2 of: trend signal, momentum signal, RSI/52w position, earnings context, news tone.
 - No prose outside the JSON.`;
 
-  let direction: "BULLISH" | "BEARISH" | "NEUTRAL" = "NEUTRAL";
-  let confidence = 0.5;
-  let summary = "No verdict produced.";
-  let reasoning = "";
-  let action: TradeAction = "HOLD";
-  let strikeHint = "";
-  let expiryHint = "";
-  let entryTrigger = "";
-  let riskNote = "";
-  let targetPrice: number | null = null;
-  let bullCase = "";
-  let bearCase = "";
-  let keyDrivers: string[] = [];
-  let nextCatalysts: string[] = [];
+  // ── PARSING HELPERS (shared across ensemble runs) ────────────────────────
+  type ParsedRun = {
+    direction: "BULLISH" | "BEARISH" | "NEUTRAL";
+    confidence: number;
+    summary: string;
+    reasoning: string;
+    action: TradeAction;
+    strikeHint: string;
+    expiryHint: string;
+    entryTrigger: string;
+    riskNote: string;
+    targetPrice: number | null;
+    bullCase: string;
+    bearCase: string;
+    keyDrivers: string[];
+    nextCatalysts: string[];
+    headlineSentiments: (Sentiment | null)[];
+  };
 
-  try {
-    const resp = await ai.models.generateContent({
-      model: MODEL,
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      config: {
-        temperature: 0.15,
-        maxOutputTokens: 6144,
-        responseMimeType: "application/json",
-      },
-    });
-    const text = resp.text ?? "";
+  const parseRun = (text: string): ParsedRun => {
     let parsed: Record<string, unknown> | null = null;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      parsed = safeJsonExtract(text);
-    }
+    try { parsed = JSON.parse(text); }
+    catch { parsed = safeJsonExtract(text); }
     const grabStr = (key: string): string => {
       const re = new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`);
       const m = text.match(re);
       return m ? m[1].replace(/\\"/g, '"').replace(/\\n/g, " ").trim() : "";
     };
-
     const cleanList = (raw: unknown, max: number): string[] => {
       if (!Array.isArray(raw)) return [];
       const out: string[] = [];
@@ -854,57 +897,63 @@ Rules:
       }
       return out;
     };
+    const out: ParsedRun = {
+      direction: "NEUTRAL", confidence: 0.5, summary: "", reasoning: "",
+      action: "HOLD", strikeHint: "", expiryHint: "", entryTrigger: "", riskNote: "",
+      targetPrice: null, bullCase: "", bearCase: "",
+      keyDrivers: [], nextCatalysts: [],
+      headlineSentiments: new Array(headlines.length).fill(null),
+    };
     if (parsed && typeof parsed === "object") {
-      direction = normalizeDirection(parsed.direction);
+      out.direction = normalizeDirection(parsed.direction);
       const c = Number(parsed.confidence);
-      if (Number.isFinite(c)) confidence = Math.max(0, Math.min(1, c));
-      if (typeof parsed.summary === "string" && parsed.summary.trim()) summary = parsed.summary.trim();
-      if (typeof parsed.reasoning === "string" && parsed.reasoning.trim()) reasoning = parsed.reasoning.trim();
+      if (Number.isFinite(c)) out.confidence = Math.max(0, Math.min(1, c));
+      if (typeof parsed.summary === "string") out.summary = parsed.summary.trim();
+      if (typeof parsed.reasoning === "string") out.reasoning = parsed.reasoning.trim();
       const a = String(parsed.action ?? "").toUpperCase();
-      if (a === "BUY_CALL" || a === "BUY_PUT" || a === "HOLD") action = a;
-      if (typeof parsed.strikeHint === "string") strikeHint = parsed.strikeHint.trim();
-      if (typeof parsed.expiryHint === "string") expiryHint = parsed.expiryHint.trim();
-      if (typeof parsed.entryTrigger === "string") entryTrigger = parsed.entryTrigger.trim();
-      if (typeof parsed.riskNote === "string") riskNote = parsed.riskNote.trim();
-      if (typeof parsed.bullCase === "string") bullCase = parsed.bullCase.trim();
-      if (typeof parsed.bearCase === "string") bearCase = parsed.bearCase.trim();
-      keyDrivers = cleanList(parsed.keyDrivers, 4);
-      nextCatalysts = cleanList(parsed.nextCatalysts, 3);
+      if (a === "BUY_CALL" || a === "BUY_PUT" || a === "HOLD") out.action = a;
+      if (typeof parsed.strikeHint === "string") out.strikeHint = parsed.strikeHint.trim();
+      if (typeof parsed.expiryHint === "string") out.expiryHint = parsed.expiryHint.trim();
+      if (typeof parsed.entryTrigger === "string") out.entryTrigger = parsed.entryTrigger.trim();
+      if (typeof parsed.riskNote === "string") out.riskNote = parsed.riskNote.trim();
+      if (typeof parsed.bullCase === "string") out.bullCase = parsed.bullCase.trim();
+      if (typeof parsed.bearCase === "string") out.bearCase = parsed.bearCase.trim();
+      out.keyDrivers = cleanList(parsed.keyDrivers, 4);
+      out.nextCatalysts = cleanList(parsed.nextCatalysts, 3);
       const tp = Number(parsed.targetPrice);
-      if (Number.isFinite(tp) && tp > 0) targetPrice = tp;
+      if (Number.isFinite(tp) && tp > 0) out.targetPrice = tp;
       if (Array.isArray(parsed.headlineSentiments)) {
         for (let i = 0; i < headlines.length; i++) {
           const s = String(parsed.headlineSentiments[i] ?? "").toUpperCase();
           if (s === "BULLISH" || s === "BEARISH" || s === "NEUTRAL") {
-            headlines[i].sentiment = s;
+            out.headlineSentiments[i] = s as Sentiment;
           }
         }
       }
     } else {
-      // Truncated / malformed JSON — recover the fields with regex.
+      // Recover with regex from truncated JSON.
       const dirM = text.match(/"direction"\s*:\s*"([A-Z_]+)"/i);
-      if (dirM) direction = normalizeDirection(dirM[1]);
+      if (dirM) out.direction = normalizeDirection(dirM[1]);
       const confM = text.match(/"confidence"\s*:\s*([0-9.]+)/);
       if (confM) {
         const c = Number(confM[1]);
-        if (Number.isFinite(c)) confidence = Math.max(0, Math.min(1, c));
+        if (Number.isFinite(c)) out.confidence = Math.max(0, Math.min(1, c));
       }
       const actM = text.match(/"action"\s*:\s*"(BUY_CALL|BUY_PUT|HOLD)"/i);
-      if (actM) action = actM[1].toUpperCase() as TradeAction;
-      strikeHint = grabStr("strikeHint") || strikeHint;
-      expiryHint = grabStr("expiryHint") || expiryHint;
-      entryTrigger = grabStr("entryTrigger") || entryTrigger;
-      riskNote = grabStr("riskNote") || riskNote;
-      bullCase = grabStr("bullCase") || bullCase;
-      bearCase = grabStr("bearCase") || bearCase;
-      summary = grabStr("summary") || summary;
-      reasoning = grabStr("reasoning") || text.slice(0, 4000);
+      if (actM) out.action = actM[1].toUpperCase() as TradeAction;
+      out.strikeHint = grabStr("strikeHint");
+      out.expiryHint = grabStr("expiryHint");
+      out.entryTrigger = grabStr("entryTrigger");
+      out.riskNote = grabStr("riskNote");
+      out.bullCase = grabStr("bullCase");
+      out.bearCase = grabStr("bearCase");
+      out.summary = grabStr("summary");
+      out.reasoning = grabStr("reasoning") || text.slice(0, 4000);
       const tpM = text.match(/"targetPrice"\s*:\s*([0-9.]+)/);
       if (tpM) {
         const tp = Number(tpM[1]);
-        if (Number.isFinite(tp) && tp > 0) targetPrice = tp;
+        if (Number.isFinite(tp) && tp > 0) out.targetPrice = tp;
       }
-      // Try to recover keyDrivers / nextCatalysts arrays.
       const arrayOf = (key: string): string[] => {
         const re = new RegExp(`"${key}"\\s*:\\s*\\[([\\s\\S]*?)\\]`);
         const m = text.match(re);
@@ -912,10 +961,109 @@ Rules:
         const items = m[1].match(/"((?:[^"\\]|\\.)*)"/g) ?? [];
         return items.map((s) => s.slice(1, -1).replace(/\\"/g, '"').trim()).filter(Boolean);
       };
-      keyDrivers = cleanList(arrayOf("keyDrivers"), 4);
-      nextCatalysts = cleanList(arrayOf("nextCatalysts"), 3);
+      out.keyDrivers = cleanList(arrayOf("keyDrivers"), 4);
+      out.nextCatalysts = cleanList(arrayOf("nextCatalysts"), 3);
     }
+    return out;
+  };
 
+  // ── ENSEMBLE: run the model N times in parallel with varied temperatures ─
+  // Then majority-vote the direction + average targetPrice/confidence so a
+  // single bad sample can't blow the call. Default 1; routes pass 3.
+  const ensemble = Math.max(1, Math.min(5, args.ensemble ?? 1));
+  const temps = [0.1, 0.25, 0.4, 0.55, 0.7].slice(0, ensemble);
+
+  let runs: ParsedRun[] = [];
+  try {
+    const responses = await Promise.allSettled(
+      temps.map((temperature) =>
+        ai.models.generateContent({
+          model: MODEL,
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          config: { temperature, maxOutputTokens: 6144, responseMimeType: "application/json" },
+        }),
+      ),
+    );
+    for (const r of responses) {
+      if (r.status === "fulfilled") {
+        const text = r.value.text ?? "";
+        if (text.trim()) runs.push(parseRun(text));
+      } else {
+        logger.warn({ err: r.reason, symbol: args.symbol }, "ensemble run failed");
+      }
+    }
+  } catch (err) {
+    logger.error({ err, symbol: args.symbol }, "market prediction failed");
+    throw err instanceof Error ? err : new Error(String(err));
+  }
+  if (runs.length === 0) {
+    throw new Error("All ensemble runs failed — model returned no usable JSON");
+  }
+
+  // Aggregate direction by weighted vote (weighted by per-run confidence).
+  const dirWeights: Record<"BULLISH" | "BEARISH" | "NEUTRAL", number> = {
+    BULLISH: 0, BEARISH: 0, NEUTRAL: 0,
+  };
+  for (const r of runs) dirWeights[r.direction] += Math.max(0.05, r.confidence);
+  let direction: "BULLISH" | "BEARISH" | "NEUTRAL" = "NEUTRAL";
+  let bestWeight = -1;
+  for (const d of ["BULLISH", "BEARISH", "NEUTRAL"] as const) {
+    if (dirWeights[d] > bestWeight) { bestWeight = dirWeights[d]; direction = d; }
+  }
+  // Confidence: mean of agreeing runs, then upweight when ALL runs agree
+  // (consensus bonus) and downweight on disagreement.
+  const agreeing = runs.filter((r) => r.direction === direction);
+  const meanConf = agreeing.length
+    ? agreeing.reduce((a, r) => a + r.confidence, 0) / agreeing.length
+    : 0.5;
+  const agreementRatio = agreeing.length / runs.length;     // 0..1
+  // Strong bonus for unanimous calls; mild penalty for split decisions.
+  const consensusAdj = agreementRatio === 1 ? 0.08 : agreementRatio >= 0.66 ? 0.0 : -0.1;
+  let confidence = Math.max(0, Math.min(0.97, meanConf + consensusAdj));
+
+  // Target price: median of agreeing runs (median = robust to outliers).
+  const targets = agreeing.map((r) => r.targetPrice).filter((v): v is number => v != null);
+  let targetPrice: number | null = null;
+  if (targets.length) {
+    const sorted = [...targets].sort((a, b) => a - b);
+    targetPrice = sorted[Math.floor(sorted.length / 2)];
+  }
+
+  // Pick the highest-confidence agreeing run for the qualitative fields so the
+  // copy stays internally consistent (instead of mixing pieces from different
+  // runs which would read incoherently).
+  const winner = agreeing.length
+    ? agreeing.slice().sort((a, b) => b.confidence - a.confidence)[0]
+    : runs[0];
+  let action: TradeAction = winner.action;
+  let summary = winner.summary || "No verdict produced.";
+  let reasoning = winner.reasoning || "";
+  let strikeHint = winner.strikeHint;
+  let expiryHint = winner.expiryHint;
+  let entryTrigger = winner.entryTrigger;
+  let riskNote = winner.riskNote;
+  let bullCase = winner.bullCase;
+  let bearCase = winner.bearCase;
+  let keyDrivers = winner.keyDrivers;
+  let nextCatalysts = winner.nextCatalysts;
+
+  // Apply headline sentiments — prefer the winner's, fill any gaps from others.
+  for (let i = 0; i < headlines.length; i++) {
+    const win = winner.headlineSentiments[i];
+    if (win) { headlines[i].sentiment = win; continue; }
+    for (const r of runs) {
+      if (r.headlineSentiments[i]) { headlines[i].sentiment = r.headlineSentiments[i]!; break; }
+    }
+  }
+
+  // Append a one-line ensemble note to reasoning so the user can see how
+  // many independent runs voted for this direction.
+  if (ensemble > 1) {
+    const tag = `[Ensemble: ${agreeing.length}/${runs.length} runs agreed on ${direction}; consensus ${Math.round(agreementRatio * 100)}%]`;
+    reasoning = reasoning ? `${reasoning}\n\n${tag}` : tag;
+  }
+
+  try {
     // Safety: enforce the rules the model is supposed to follow itself.
     if (confidence < 0.55) action = "HOLD";
     if (action === "BUY_CALL" && direction !== "BULLISH") action = "HOLD";
@@ -928,7 +1076,7 @@ Rules:
       if (move > 0.2) targetPrice = quote.price * 1.2;
       if (move < -0.2) targetPrice = quote.price * 0.8;
     }
-    // Fallback: derive a target from direction + confidence if model omitted it
+    // Fallback: derive a target from direction + confidence if model omitted it.
     if (!targetPrice && quote?.price) {
       const horizonScale: Record<string, number> = { "1d": 0.005, "1w": 0.02, "1m": 0.05, "3m": 0.1 };
       const base = horizonScale[args.horizon] ?? 0.02;
@@ -937,11 +1085,8 @@ Rules:
       else if (direction === "BEARISH") targetPrice = quote.price * (1 - magnitude);
       else targetPrice = quote.price;
     }
-
-    // Tie sentiments to a quick bullish/bearish/neutral count signal we can show.
-    // (No-op for storage — the headline objects already carry .sentiment.)
   } catch (err) {
-    logger.error({ err, symbol: args.symbol }, "market prediction failed");
+    logger.error({ err, symbol: args.symbol }, "market prediction post-processing failed");
     throw err instanceof Error ? err : new Error(String(err));
   }
 
@@ -1111,6 +1256,21 @@ export function computeIndicators(symbol: string, dailyCloses: number[]): Indica
     for (let i = dailyCloses.length - n; i < dailyCloses.length; i++) sum += dailyCloses[i];
     return sum / n;
   };
+  // EMA computed across the entire series (so MACD uses a stable history).
+  const emaSeries = (n: number): number[] => {
+    if (dailyCloses.length < n) return [];
+    const k = 2 / (n + 1);
+    let prev = 0;
+    for (let i = 0; i < n; i++) prev += dailyCloses[i];
+    prev /= n;
+    const out: number[] = new Array(n - 1).fill(prev);
+    out.push(prev);
+    for (let i = n; i < dailyCloses.length; i++) {
+      prev = dailyCloses[i] * k + prev * (1 - k);
+      out.push(prev);
+    }
+    return out;
+  };
   const rsi = (n: number): number | null => {
     if (dailyCloses.length < n + 1) return null;
     let gains = 0;
@@ -1137,6 +1297,75 @@ export function computeIndicators(symbol: string, dailyCloses: number[]): Indica
     const variance = rets.reduce((a, b) => a + (b - mean) ** 2, 0) / rets.length;
     return Math.sqrt(variance) * 100;
   };
+  // Bollinger bands: 20-period SMA ± 2 stddev.
+  const bollinger = (n = 20, k = 2) => {
+    if (dailyCloses.length < n) return { mid: null, upper: null, lower: null } as const;
+    const slice = dailyCloses.slice(-n);
+    const mid = slice.reduce((a, b) => a + b, 0) / n;
+    const variance = slice.reduce((a, b) => a + (b - mid) ** 2, 0) / n;
+    const sd = Math.sqrt(variance);
+    return { mid, upper: mid + k * sd, lower: mid - k * sd } as const;
+  };
+  // Stochastic %K over the last n closes (proxy without intra-bar high/low).
+  const stochK = (n = 14): number | null => {
+    if (dailyCloses.length < n) return null;
+    const slice = dailyCloses.slice(-n);
+    const hi = Math.max(...slice);
+    const lo = Math.min(...slice);
+    if (hi === lo) return 50;
+    return ((slice[slice.length - 1] - lo) / (hi - lo)) * 100;
+  };
+  // ATR-style proxy from close-to-close moves (we lack intra-bar H/L here).
+  const atrPct = (n = 14): number | null => {
+    if (dailyCloses.length < n + 1) return null;
+    let sum = 0;
+    for (let i = dailyCloses.length - n; i < dailyCloses.length; i++) {
+      const prev = dailyCloses[i - 1];
+      if (!prev) continue;
+      sum += Math.abs(dailyCloses[i] - prev) / prev;
+    }
+    return (sum / n) * 100;
+  };
+  // MACD (12,26,9)
+  const ema12s = emaSeries(12);
+  const ema26s = emaSeries(26);
+  let macd: number | null = null;
+  let macdSignal: number | null = null;
+  let macdHist: number | null = null;
+  if (ema12s.length === dailyCloses.length && ema26s.length === dailyCloses.length && dailyCloses.length >= 35) {
+    const macdSeries: number[] = [];
+    for (let i = 0; i < dailyCloses.length; i++) macdSeries.push(ema12s[i] - ema26s[i]);
+    // 9-period EMA of MACD line
+    const k = 2 / (9 + 1);
+    let prev = 0;
+    const start = Math.max(0, macdSeries.length - 50);
+    let count = 0;
+    for (let i = start; i < start + 9 && i < macdSeries.length; i++) { prev += macdSeries[i]; count++; }
+    if (count > 0) prev /= count;
+    for (let i = start + 9; i < macdSeries.length; i++) {
+      prev = macdSeries[i] * k + prev * (1 - k);
+    }
+    macd = macdSeries[macdSeries.length - 1];
+    macdSignal = prev;
+    macdHist = macd - macdSignal;
+  }
+  const bb = bollinger(20, 2);
+  const bbWidthPct = bb.mid && bb.upper != null && bb.lower != null
+    ? ((bb.upper - bb.lower) / bb.mid) * 100 : null;
+
+  // Multi-timeframe trend agreement score: +1 each for short / medium / long
+  // direction agreement. -3..+3.
+  const sma20v = sma(20);
+  const sma50v = sma(50);
+  const sma200v = sma(200);
+  let trendScore: number | null = null;
+  if (last != null && sma20v != null) {
+    let s = 0;
+    if (sma20v != null) s += last > sma20v ? 1 : -1;
+    if (sma50v != null) s += last > sma50v ? 1 : -1;
+    if (sma200v != null) s += last > sma200v ? 1 : -1;
+    trendScore = s;
+  }
   const window52 = dailyCloses.slice(-252);
   return {
     symbol,
@@ -1144,12 +1373,22 @@ export function computeIndicators(symbol: string, dailyCloses: number[]): Indica
     change1d: change(1),
     change5d: change(5),
     change1m: change(21),
-    sma20: sma(20),
-    sma50: sma(50),
+    sma20: sma20v,
+    sma50: sma50v,
+    ema12: ema12s.length ? ema12s[ema12s.length - 1] : null,
+    ema26: ema26s.length ? ema26s[ema26s.length - 1] : null,
     rsi14: rsi(14),
+    macd, macdSignal, macdHist,
+    bbUpper: bb.upper,
+    bbLower: bb.lower,
+    bbMid: bb.mid,
+    bbWidthPct,
+    stochK14: stochK(14),
+    atr14Pct: atrPct(14),
     high52w: window52.length ? Math.max(...window52) : null,
     low52w: window52.length ? Math.min(...window52) : null,
     volatility20d: volatility(20),
+    trendScore,
     asOf: new Date().toISOString(),
   };
 }

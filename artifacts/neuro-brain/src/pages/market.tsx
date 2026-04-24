@@ -175,11 +175,49 @@ interface Indicators {
   change1m: number | null;
   sma20: number | null;
   sma50: number | null;
+  ema12?: number | null;
+  ema26?: number | null;
   rsi14: number | null;
+  macd?: number | null;
+  macdSignal?: number | null;
+  macdHist?: number | null;
+  bbUpper?: number | null;
+  bbLower?: number | null;
+  bbMid?: number | null;
+  bbWidthPct?: number | null;
+  stochK14?: number | null;
+  atr14Pct?: number | null;
+  trendScore?: number | null;
   high52w: number | null;
   low52w: number | null;
   volatility20d: number | null;
   asOf: string;
+}
+
+// User-marked trade — what the backend returns from /api/market/trades
+// (the row plus computed live P/L fields).
+interface UserTrade {
+  id: string;
+  watchId: string;
+  predictionId: string | null;
+  symbol: string;
+  action: "BUY_CALL" | "BUY_PUT";
+  entryPrice: number;
+  targetPrice: number | null;
+  horizon: string;
+  strikeHint: string;
+  expiryHint: string;
+  quantity: number;
+  notes: string;
+  status: "OPEN" | "CLOSED";
+  closePrice: number | null;
+  closedAt: string | null;
+  openedAt: string;
+  livePrice: number | null;
+  pnlPct: number | null;
+  pnlAbs: number | null;
+  targetProgressPct: number | null;
+  reachedTarget: boolean;
 }
 
 const MARKET_OPTIONS = [
@@ -569,6 +607,75 @@ function WatchDetail({ watch }: { watch: Watch }) {
   const [loading, setLoading] = useState(true);
   const [predicting, setPredicting] = useState(false);
   const [horizon, setHorizon] = useState("1w");
+  const [trades, setTrades] = useState<UserTrade[]>([]);
+
+  const loadTrades = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/market/trades?watchId=${encodeURIComponent(watch.id)}`);
+      if (!r.ok) return;
+      const data = await r.json();
+      setTrades((data.trades as UserTrade[]) ?? []);
+    } catch { /* ignore */ }
+  }, [watch.id]);
+
+  // Refresh trades every 5s so the live PnL chip on the chart stays current.
+  useEffect(() => {
+    void loadTrades();
+    const id = setInterval(() => { void loadTrades(); }, 5_000);
+    return () => clearInterval(id);
+  }, [loadTrades]);
+
+  const tradedPredictionIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const t of trades) {
+      if (t.predictionId && t.status === "OPEN") s.add(t.predictionId);
+    }
+    return s;
+  }, [trades]);
+
+  const handleMarkTrade = useCallback(async (p: Prediction) => {
+    try {
+      const r = await fetch("/api/market/trades", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          watchId: watch.id,
+          predictionId: p.id,
+          symbol: p.symbol,
+          action: p.action,
+          targetPrice: p.targetPrice,
+          horizon: p.horizon,
+          strikeHint: p.strikeHint,
+          expiryHint: p.expiryHint,
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error ?? "Could not mark trade");
+      toast.success(`Trade tracked at ${data.trade.entryPrice}`);
+      void loadTrades();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not mark trade");
+    }
+  }, [watch.id, loadTrades]);
+
+  const handleCloseTrade = useCallback(async (id: string) => {
+    try {
+      const r = await fetch(`/api/market/trades/${id}/close`, { method: "POST" });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error ?? "Could not close trade");
+      toast.success(`Trade closed at ${data.trade.closePrice} (${data.trade.pnlPct?.toFixed(2)}%)`);
+      void loadTrades();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not close trade");
+    }
+  }, [loadTrades]);
+
+  const handleDeleteTrade = useCallback(async (id: string) => {
+    try {
+      await fetch(`/api/market/trades/${id}`, { method: "DELETE" });
+      void loadTrades();
+    } catch { /* ignore */ }
+  }, [loadTrades]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -710,7 +817,13 @@ function WatchDetail({ watch }: { watch: Watch }) {
         </CardHeader>
       </Card>
 
-      <LivePriceChart watch={watch} prediction={latest ?? null} />
+      <LivePriceChart watch={watch} prediction={latest ?? null} trades={trades} />
+
+      <OpenTradesPanel
+        trades={trades}
+        onClose={handleCloseTrade}
+        onDelete={handleDeleteTrade}
+      />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <TrackRecordCard track={trackRecord} loading={loading} />
@@ -722,7 +835,14 @@ function WatchDetail({ watch }: { watch: Watch }) {
         <MarketChat watch={watch} />
       </div>
 
-      {latest && <PredictionCard prediction={latest} headline />}
+      {latest && (
+        <PredictionCard
+          prediction={latest}
+          headline
+          onMarkTrade={handleMarkTrade}
+          alreadyTradedIds={tradedPredictionIds}
+        />
+      )}
 
       <Card>
         <CardHeader>
@@ -781,9 +901,11 @@ const RANGE_BUCKET_MS: Record<string, number> = {
 function LivePriceChart({
   watch,
   prediction,
+  trades = [],
 }: {
   watch: Watch;
   prediction: Prediction | null;
+  trades?: UserTrade[];
 }) {
   const [rangeKey, setRangeKey] = useState<keyof typeof RANGE_PRESETS>("1D");
   const [series, setSeries] = useState<CandleSeries | null>(null);
@@ -1245,6 +1367,49 @@ function LivePriceChart({
               </g>
             )}
 
+            {/* USER TRADE ENTRY MARKERS — drawn for every open trade on this watch.
+               Shown as a horizontal dotted line at the entry price plus an arrow
+               (▲ for CALL, ▼ for PUT) and a live PnL % chip on the right. */}
+            {view && trades.filter((t) => t.status === "OPEN").map((t, i) => {
+              if (t.entryPrice < view.pMin || t.entryPrice > view.pMax) return null;
+              const y = view.yOf(t.entryPrice);
+              const isCall = t.action === "BUY_CALL";
+              const color = isCall ? "#22c55e" : "#ef4444";
+              const arrow = isCall ? "▲" : "▼";
+              const pnl = t.pnlPct;
+              const pnlStr = pnl == null ? "—"
+                : `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%`;
+              const pnlColor = pnl == null ? "hsl(var(--muted-foreground))"
+                : pnl >= 0 ? "#22c55e" : "#ef4444";
+              const chipW = isNarrow ? 60 : 78;
+              const chipH = 16;
+              const chipX = view.x1 - chipW - 2;
+              return (
+                <g key={`trade${t.id}`} pointerEvents="none">
+                  <line x1={view.x0} x2={view.x1} y1={y} y2={y}
+                    stroke={color} strokeWidth={1} strokeDasharray="3 3" opacity={0.7} />
+                  <text x={view.x0 + 6} y={y - 3}
+                    fontSize={isNarrow ? "9" : "10"}
+                    fontFamily="monospace" fill={color} fontWeight="bold">
+                    {arrow} {isCall ? "CALL" : "PUT"} @ {fmtPrice(t.entryPrice)}
+                  </text>
+                  <rect x={chipX} y={y - chipH / 2}
+                    width={chipW} height={chipH} rx={3}
+                    fill="hsl(var(--background))" stroke={pnlColor} strokeWidth={1} opacity={0.95} />
+                  <text x={chipX + chipW / 2} y={y + 3.5}
+                    textAnchor="middle"
+                    fontSize={isNarrow ? "9" : "10"}
+                    fontFamily="monospace" fill={pnlColor} fontWeight="bold">
+                    {pnlStr}
+                  </text>
+                  {/* tiny stagger marker so multiple trades at similar prices don't fully overlap */}
+                  {i > 0 && (
+                    <circle cx={view.x0 + 1} cy={y} r={1.5} fill={color} />
+                  )}
+                </g>
+              );
+            })}
+
             {/* Live pulse on the most recent live point — sits on top of overlay */}
             {livePrice != null && livePivot && view && (
               <>
@@ -1567,12 +1732,193 @@ function actionMeta(a: TradeAction) {
   };
 }
 
-function PredictionCard({ prediction, headline }: { prediction: Prediction; headline?: boolean }) {
+// ── My open trades — live P/L from the user's manually-marked entries ──────
+function OpenTradesPanel({
+  trades,
+  onClose,
+  onDelete,
+}: {
+  trades: UserTrade[];
+  onClose: (id: string) => Promise<void> | void;
+  onDelete: (id: string) => Promise<void> | void;
+}) {
+  const open = trades.filter((t) => t.status === "OPEN");
+  const closed = trades.filter((t) => t.status === "CLOSED").slice(0, 5);
+  if (open.length === 0 && closed.length === 0) return null;
+
+  // Roll-up stats for the header.
+  const totalPnlPct = open.length
+    ? open.reduce((acc, t) => acc + (t.pnlPct ?? 0), 0) / open.length
+    : null;
+  const winners = open.filter((t) => (t.pnlPct ?? 0) > 0).length;
+  const losers = open.filter((t) => (t.pnlPct ?? 0) < 0).length;
+
+  const fmt = (v: number | null, digits = 2) =>
+    v == null || !Number.isFinite(v) ? "—" : v.toFixed(digits);
+  const tone = (v: number | null) =>
+    v == null ? "text-muted-foreground" : v >= 0 ? "text-green-400" : "text-red-400";
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Target className="w-4 h-4 text-primary" /> My trades
+            </CardTitle>
+            <CardDescription>
+              {open.length} open · {closed.length} recently closed
+              {totalPnlPct != null && (
+                <> · avg open P/L <span className={`font-mono ${tone(totalPnlPct)}`}>
+                  {totalPnlPct >= 0 ? "+" : ""}{fmt(totalPnlPct)}%
+                </span></>
+              )}
+            </CardDescription>
+          </div>
+          {open.length > 0 && (
+            <div className="flex gap-2 text-[11px]">
+              <Badge variant="outline" className="text-green-300 border-green-500/40">↑ {winners} winning</Badge>
+              <Badge variant="outline" className="text-red-300 border-red-500/40">↓ {losers} losing</Badge>
+            </div>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {open.length === 0 ? (
+          <div className="text-xs text-muted-foreground italic">
+            No open trades. Click "I took this trade" on any BUY signal to start tracking your live P/L here.
+          </div>
+        ) : (
+          open.map((t) => {
+            const isCall = t.action === "BUY_CALL";
+            const sideColor = isCall ? "text-green-400 border-green-500/40" : "text-red-400 border-red-500/40";
+            const sideIcon = isCall ? <TrendingUp className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />;
+            const pnlTone = tone(t.pnlPct);
+            return (
+              <div key={t.id} className="rounded-lg border border-border/60 bg-muted/20 p-3">
+                <div className="flex flex-wrap items-center gap-2 text-sm">
+                  <Badge variant="outline" className={`text-[10px] uppercase ${sideColor}`}>
+                    {sideIcon} {isCall ? "CALL" : "PUT"}
+                  </Badge>
+                  <span className="font-mono font-bold">{t.symbol}</span>
+                  <Badge variant="outline" className="text-[10px] uppercase">{t.horizon}</Badge>
+                  {t.reachedTarget && (
+                    <Badge variant="outline" className="text-emerald-300 border-emerald-500/40 text-[10px]">
+                      ★ TARGET HIT
+                    </Badge>
+                  )}
+                  <span className="text-xs text-muted-foreground ml-auto">
+                    Opened {new Date(t.openedAt).toLocaleString()}
+                  </span>
+                </div>
+                <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                  <div>
+                    <div className="text-[10px] uppercase text-muted-foreground">Entry</div>
+                    <div className="font-mono">{fmt(t.entryPrice)}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase text-muted-foreground">Live</div>
+                    <div className="font-mono">{fmt(t.livePrice)}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase text-muted-foreground">P/L %</div>
+                    <div className={`font-mono font-bold ${pnlTone}`}>
+                      {t.pnlPct == null ? "—"
+                        : `${t.pnlPct >= 0 ? "+" : ""}${fmt(t.pnlPct)}%`}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase text-muted-foreground">Target</div>
+                    <div className="font-mono">{fmt(t.targetPrice)}</div>
+                  </div>
+                </div>
+                {t.targetProgressPct != null && (
+                  <div className="mt-2">
+                    <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+                      <div
+                        className={isCall ? "h-full bg-green-500" : "h-full bg-red-500"}
+                        style={{ width: `${Math.max(0, Math.min(100, t.targetProgressPct))}%` }}
+                      />
+                    </div>
+                    <div className="text-[10px] text-muted-foreground text-right mt-0.5">
+                      {t.targetProgressPct.toFixed(0)}% of the way to target
+                    </div>
+                  </div>
+                )}
+                {(t.strikeHint || t.expiryHint) && (
+                  <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+                    {t.strikeHint && <span>Strike: <span className="text-foreground">{t.strikeHint}</span></span>}
+                    {t.expiryHint && <span>Expiry: <span className="text-foreground">{t.expiryHint}</span></span>}
+                  </div>
+                )}
+                <div className="mt-2 flex gap-2">
+                  <Button size="sm" variant="outline" onClick={() => void onClose(t.id)} className="h-7 text-xs">
+                    Close at live price
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => void onDelete(t.id)} className="h-7 text-xs text-muted-foreground hover:text-red-400">
+                    <Trash2 className="w-3 h-3" />
+                  </Button>
+                </div>
+              </div>
+            );
+          })
+        )}
+        {closed.length > 0 && (
+          <div className="pt-2 border-t border-border/40 space-y-1">
+            <div className="text-[10px] uppercase text-muted-foreground">Recently closed</div>
+            {closed.map((t) => {
+              const isCall = t.action === "BUY_CALL";
+              return (
+                <div key={t.id} className="flex flex-wrap items-center gap-2 text-xs py-1">
+                  <Badge variant="outline" className="text-[10px] uppercase">
+                    {isCall ? "CALL" : "PUT"} · {t.symbol}
+                  </Badge>
+                  <span className="font-mono">{fmt(t.entryPrice)} → {fmt(t.closePrice)}</span>
+                  <span className={`font-mono font-bold ${tone(t.pnlPct)}`}>
+                    {t.pnlPct == null ? "—"
+                      : `${t.pnlPct >= 0 ? "+" : ""}${fmt(t.pnlPct)}%`}
+                  </span>
+                  <span className="text-muted-foreground ml-auto">
+                    {t.closedAt && new Date(t.closedAt).toLocaleString()}
+                  </span>
+                  <Button size="sm" variant="ghost" onClick={() => void onDelete(t.id)} className="h-6 w-6 p-0">
+                    <Trash2 className="w-3 h-3" />
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function PredictionCard({
+  prediction,
+  headline,
+  onMarkTrade,
+  alreadyTradedIds,
+}: {
+  prediction: Prediction;
+  headline?: boolean;
+  onMarkTrade?: (p: Prediction) => Promise<void> | void;
+  alreadyTradedIds?: Set<string>;
+}) {
   const meta = directionMeta(prediction.direction);
   const Icon = meta.Icon;
   const pct = Math.round(prediction.confidence * 100);
   const trade = actionMeta(prediction.action);
   const TradeIcon = trade.Icon;
+  const [submitting, setSubmitting] = useState(false);
+  const canMark = prediction.action === "BUY_CALL" || prediction.action === "BUY_PUT";
+  const alreadyMarked = alreadyTradedIds?.has(prediction.id) ?? false;
+  const handleMark = async () => {
+    if (!onMarkTrade || !canMark || alreadyMarked || submitting) return;
+    setSubmitting(true);
+    try { await onMarkTrade(prediction); }
+    finally { setSubmitting(false); }
+  };
   return (
     <Card className={headline ? "border-primary/40" : undefined}>
       <CardContent className="pt-5 space-y-3">
@@ -1617,6 +1963,24 @@ function PredictionCard({ prediction, headline }: { prediction: Prediction; head
               {prediction.riskNote && (
                 <div className="sm:col-span-2 text-amber-300/90"><span className="font-semibold">Invalidated if:</span> {prediction.riskNote}</div>
               )}
+            </div>
+          )}
+          {onMarkTrade && canMark && (
+            <div className="mt-3 pt-3 border-t border-current/15 flex items-center gap-2 flex-wrap">
+              <Button
+                size="sm"
+                variant={alreadyMarked ? "outline" : "default"}
+                disabled={alreadyMarked || submitting}
+                onClick={handleMark}
+                className="h-8"
+              >
+                {alreadyMarked ? "✓ Trade tracked"
+                  : submitting ? "Marking…"
+                  : "I took this trade"}
+              </Button>
+              <span className="text-[11px] opacity-75">
+                Locks in current live price as your entry — we'll track the live P/L for you.
+              </span>
             </div>
           )}
         </div>

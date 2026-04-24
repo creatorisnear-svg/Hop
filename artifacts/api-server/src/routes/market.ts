@@ -1,6 +1,11 @@
 import { Router, type IRouter } from "express";
 import { randomUUID } from "node:crypto";
-import { db, marketWatchesTable, marketPredictionsTable } from "@workspace/db";
+import {
+  db,
+  marketWatchesTable,
+  marketPredictionsTable,
+  marketUserTradesTable,
+} from "@workspace/db";
 import { desc, eq } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import {
@@ -167,12 +172,21 @@ router.post("/market/watches/:id/predict", async (req, res) => {
   if (!watch) return res.status(404).json({ error: "watch not found" });
 
   try {
+    // Allow caller to override (1..5). Default to 3-run ensemble — that's the
+    // sweet spot for accuracy vs. latency: catches single-run hallucinations
+    // and stabilises the targetPrice via median aggregation.
+    const ensembleRaw = Number(req.body?.ensemble);
+    const ensemble = Number.isFinite(ensembleRaw)
+      ? Math.max(1, Math.min(5, Math.floor(ensembleRaw)))
+      : 3;
+
     const result = await predictMarket({
       symbol: watch.symbol,
       name: watch.name,
       market: watch.market,
       horizon,
       notes: watch.notes,
+      ensemble,
     });
 
     const predictionId = randomUUID();
@@ -495,6 +509,177 @@ router.get("/market/candles/:symbol", async (req, res) => {
   if (!series) return res.status(404).json({ error: "candles unavailable" });
   candleCache.set(cacheKey, { ts: now, data: series });
   res.json({ series });
+});
+
+// ─── USER TRADE TRACKING ─────────────────────────────────────────────────
+// When the user clicks "I took this trade" we record an entry so we can
+// continue showing live P/L even after the prediction itself rolls off the
+// active list.
+type EnrichedTrade = {
+  id: string;
+  watchId: string;
+  predictionId: string | null;
+  symbol: string;
+  action: string;
+  entryPrice: number;
+  targetPrice: number | null;
+  horizon: string;
+  strikeHint: string;
+  expiryHint: string;
+  quantity: number;
+  notes: string;
+  status: string;
+  closePrice: number | null;
+  closedAt: Date | null;
+  openedAt: Date;
+  // Computed fields
+  livePrice: number | null;
+  pnlPct: number | null;            // signed % move from entry, oriented to the trade direction
+  pnlAbs: number | null;            // signed absolute move (livePrice - entryPrice), direction-aware
+  targetProgressPct: number | null; // 0..100 — how far from entry to target the price has traveled
+  reachedTarget: boolean;
+};
+
+async function enrichTradeWithLive(row: typeof marketUserTradesTable.$inferSelect): Promise<EnrichedTrade> {
+  let livePrice: number | null = null;
+  if (row.status === "OPEN") {
+    const cacheKey = row.symbol.toUpperCase();
+    const now = Date.now();
+    const hit = quoteCache.get(cacheKey);
+    if (hit && now - hit.ts < QUOTE_TTL_MS) {
+      const q = hit.data as { price: number | null } | null;
+      livePrice = q?.price ?? null;
+    } else {
+      const q = await fetchYahooQuote(row.symbol);
+      if (q) {
+        quoteCache.set(cacheKey, { ts: now, data: q });
+        livePrice = q.price ?? null;
+      }
+    }
+  } else {
+    livePrice = row.closePrice;
+  }
+  let pnlPct: number | null = null;
+  let pnlAbs: number | null = null;
+  let targetProgressPct: number | null = null;
+  let reachedTarget = false;
+  if (livePrice != null && row.entryPrice) {
+    const rawPct = ((livePrice - row.entryPrice) / row.entryPrice) * 100;
+    const sign = row.action === "BUY_PUT" ? -1 : 1;
+    pnlPct = rawPct * sign;
+    pnlAbs = (livePrice - row.entryPrice) * sign;
+    if (row.targetPrice && row.targetPrice !== row.entryPrice) {
+      const total = row.targetPrice - row.entryPrice;
+      const moved = livePrice - row.entryPrice;
+      const ratio = total === 0 ? 0 : moved / total;
+      targetProgressPct = Math.max(0, Math.min(150, ratio * 100));
+      reachedTarget = sign > 0
+        ? livePrice >= row.targetPrice
+        : livePrice <= row.targetPrice;
+    }
+  }
+  return {
+    ...row,
+    livePrice,
+    pnlPct,
+    pnlAbs,
+    targetProgressPct,
+    reachedTarget,
+  };
+}
+
+router.get("/market/trades", async (req, res) => {
+  const status = (req.query.status as string | undefined)?.toUpperCase();
+  const watchId = req.query.watchId as string | undefined;
+  let q = db.select().from(marketUserTradesTable).$dynamic();
+  if (watchId) q = q.where(eq(marketUserTradesTable.watchId, watchId));
+  const rows = await q.orderBy(desc(marketUserTradesTable.openedAt)).limit(200);
+  const filtered = status ? rows.filter((r) => r.status === status) : rows;
+  const enriched = await Promise.all(filtered.map(enrichTradeWithLive));
+  res.json({ trades: enriched });
+});
+
+router.post("/market/trades", async (req, res) => {
+  const body = (req.body ?? {}) as {
+    watchId?: string;
+    predictionId?: string | null;
+    symbol?: string;
+    action?: string;
+    entryPrice?: number;
+    targetPrice?: number | null;
+    horizon?: string;
+    strikeHint?: string;
+    expiryHint?: string;
+    quantity?: number;
+    notes?: string;
+  };
+  const watchId = (body.watchId ?? "").trim();
+  const symbol = (body.symbol ?? "").trim().toUpperCase();
+  const action = (body.action ?? "").trim().toUpperCase();
+  if (!watchId || !symbol) return res.status(400).json({ error: "watchId and symbol are required" });
+  if (action !== "BUY_CALL" && action !== "BUY_PUT") {
+    return res.status(400).json({ error: "action must be BUY_CALL or BUY_PUT" });
+  }
+  // Use supplied entryPrice if present (so the user can lock in the exact
+  // price they saw on screen). Otherwise fall back to the live quote.
+  let entryPrice = Number(body.entryPrice);
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+    const q = await fetchYahooQuote(symbol);
+    if (!q?.price) return res.status(400).json({ error: "could not resolve entry price — supply entryPrice" });
+    entryPrice = q.price;
+  }
+  const id = randomUUID();
+  const [row] = await db
+    .insert(marketUserTradesTable)
+    .values({
+      id,
+      watchId,
+      predictionId: body.predictionId ?? null,
+      symbol,
+      action,
+      entryPrice,
+      targetPrice: body.targetPrice ?? null,
+      horizon: (body.horizon ?? "1w").trim() || "1w",
+      strikeHint: (body.strikeHint ?? "").trim(),
+      expiryHint: (body.expiryHint ?? "").trim(),
+      quantity: Number.isFinite(Number(body.quantity)) ? Number(body.quantity) : 1,
+      notes: (body.notes ?? "").trim(),
+    })
+    .returning();
+  const enriched = await enrichTradeWithLive(row);
+  res.status(201).json({ trade: enriched });
+});
+
+router.post("/market/trades/:id/close", async (req, res) => {
+  const id = req.params.id;
+  const [trade] = await db
+    .select()
+    .from(marketUserTradesTable)
+    .where(eq(marketUserTradesTable.id, id))
+    .limit(1);
+  if (!trade) return res.status(404).json({ error: "trade not found" });
+  if (trade.status === "CLOSED") {
+    const enriched = await enrichTradeWithLive(trade);
+    return res.json({ trade: enriched });
+  }
+  let closePrice = Number(req.body?.closePrice);
+  if (!Number.isFinite(closePrice) || closePrice <= 0) {
+    const q = await fetchYahooQuote(trade.symbol);
+    if (!q?.price) return res.status(400).json({ error: "could not resolve close price" });
+    closePrice = q.price;
+  }
+  const [updated] = await db
+    .update(marketUserTradesTable)
+    .set({ status: "CLOSED", closePrice, closedAt: new Date() })
+    .where(eq(marketUserTradesTable.id, id))
+    .returning();
+  const enriched = await enrichTradeWithLive(updated);
+  res.json({ trade: enriched });
+});
+
+router.delete("/market/trades/:id", async (req, res) => {
+  await db.delete(marketUserTradesTable).where(eq(marketUserTradesTable.id, req.params.id));
+  res.json({ ok: true });
 });
 
 export default router;
