@@ -1090,31 +1090,51 @@ Rules:
   const ensemble = Math.max(1, Math.min(5, args.ensemble ?? 1));
   const temps = [0.1, 0.25, 0.4, 0.55, 0.7].slice(0, ensemble);
 
-  let runs: ParsedRun[] = [];
-  try {
-    const responses = await Promise.allSettled(
-      temps.map((temperature) =>
-        ai.models.generateContent({
-          model: MODEL,
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-          config: { temperature, maxOutputTokens: 6144, responseMimeType: "application/json" },
-        }),
-      ),
-    );
-    for (const r of responses) {
-      if (r.status === "fulfilled") {
-        const text = r.value.text ?? "";
-        if (text.trim()) runs.push(parseRun(text));
-      } else {
-        logger.warn({ err: r.reason, symbol: args.symbol }, "ensemble run failed");
+  // Helper: fire one model call and parse it. Does NOT throw — returns null on failure.
+  const callModel = async (temperature: number): Promise<ParsedRun | null> => {
+    try {
+      const res = await ai.models.generateContent({
+        model: MODEL,
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        // Note: no responseMimeType — prompt already instructs JSON output and
+        // safeJsonExtract handles partially-formatted responses gracefully.
+        config: { temperature, maxOutputTokens: 6144 },
+      });
+      const text = (res.text ?? "").trim();
+      if (!text) {
+        logger.warn({ symbol: args.symbol, temperature }, "ensemble run returned empty response");
+        return null;
       }
+      return parseRun(text);
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), symbol: args.symbol, temperature },
+        "ensemble run failed",
+      );
+      return null;
     }
-  } catch (err) {
-    logger.error({ err, symbol: args.symbol }, "market prediction failed");
-    throw err instanceof Error ? err : new Error(String(err));
-  }
+  };
+
+  let runs: ParsedRun[] = [];
+
+  // Primary: run ensemble in parallel.
+  const primary = await Promise.all(temps.map(callModel));
+  runs = primary.filter((r): r is ParsedRun => r !== null);
+
+  // Fallback: if ALL parallel runs failed, try once more sequentially at the
+  // most deterministic temperature before giving up.
   if (runs.length === 0) {
-    throw new Error("All ensemble runs failed — model returned no usable JSON");
+    logger.warn({ symbol: args.symbol, ensemble }, "all primary ensemble runs failed — attempting single fallback call");
+    const fallback = await callModel(0.1);
+    if (fallback) runs = [fallback];
+  }
+
+  if (runs.length === 0) {
+    throw new Error(
+      `Prediction failed: the AI model could not be reached for ${args.symbol}. ` +
+      `This usually means the API key is rate-limited or the model is temporarily unavailable. ` +
+      `Please wait a moment and try again.`,
+    );
   }
 
   // Aggregate direction by weighted vote (weighted by per-run confidence).
