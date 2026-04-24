@@ -860,7 +860,7 @@ function WatchDetail({ watch }: { watch: Watch }) {
         </CardHeader>
       </Card>
 
-      <LivePriceChart watch={watch} prediction={latest ?? null} trades={trades} />
+      <LivePriceChart watch={watch} prediction={latest ?? null} trades={trades} selectedHorizon={horizon} onRequestPredict={runPredict} predicting={predicting} />
 
       <OpenTradesPanel
         trades={trades}
@@ -949,10 +949,16 @@ function LivePriceChart({
   watch,
   prediction,
   trades = [],
+  selectedHorizon,
+  onRequestPredict,
+  predicting = false,
 }: {
   watch: Watch;
   prediction: Prediction | null;
   trades?: UserTrade[];
+  selectedHorizon: string;
+  onRequestPredict?: () => void;
+  predicting?: boolean;
 }) {
   const [rangeKey, setRangeKey] = useState<keyof typeof RANGE_PRESETS>("1D");
   const [series, setSeries] = useState<CandleSeries | null>(null);
@@ -1081,8 +1087,22 @@ function LivePriceChart({
     return Math.max(0, histCandles.length - baseLen);
   }, [histCandles, series, rangeKey]);
 
-  const horizon = prediction?.horizon ?? "1w";
-  const projectionMs = HORIZON_MS[horizon] ?? HORIZON_MS["1w"];
+  // Day-trading rule: the chart's projection window MUST track what the user
+  // currently has selected in the dropdown — not whatever horizon some old
+  // prediction was generated for. Otherwise switching from "1 week" → "1 hour
+  // scalp" leaves the chart still drawing a wavy line a full week into the
+  // future, which is misleading and visually dominates the actual price action.
+  const horizon = selectedHorizon;
+  const projectionMs = HORIZON_MS[horizon] ?? HORIZON_MS["1d"];
+
+  // A prediction is "stale" when the user has changed the horizon since it was
+  // generated. The targetPrice from the old prediction was calibrated for a
+  // different time window — projecting it into a different window would be
+  // flat-out inaccurate (e.g. a 1-week +0.34% target squashed onto a 1-hour
+  // axis still says "+0.34% in 1 hour", which is a totally different bet).
+  // We hide the misleading projection and prompt for a fresh prediction.
+  const predictionStale = !!prediction && prediction.horizon !== selectedHorizon;
+  const showProjection = !!prediction?.targetPrice && !predictionStale;
 
   // Intraday day-trader levels — computed only on the 1D range. These are the
   // bread-and-butter reference lines a puts/calls scalper watches all day:
@@ -1499,7 +1519,10 @@ function LivePriceChart({
             </CardTitle>
             <CardDescription className="flex items-center gap-2 mt-0.5 flex-wrap">
               <span>{rangeKey === "1D" ? "1-min candles + 1s live ticks" : `${RANGE_PRESETS[rangeKey].interval} candles · ${RANGE_PRESETS[rangeKey].range}`}</span>
-              {prediction?.targetPrice && <span>· forecast to {horizon}</span>}
+              {showProjection && <span>· forecast to {horizon}</span>}
+              {predictionStale && (
+                <span className="text-amber-500">· prediction is for {prediction!.horizon}, re-predict for {horizon}</span>
+              )}
               {series?.marketState && (
                 <Badge variant="outline" className="text-[10px] uppercase">{series.marketState}</Badge>
               )}
@@ -1911,7 +1934,7 @@ function LivePriceChart({
             })}
 
             {/* PREDICTION OVERLAY — drawn INSIDE the chart, sharing the axes */}
-            {liveProjection && view && (
+            {liveProjection && view && showProjection && (
               <g>
                 {/* "now" divider — soft separator between past and projection */}
                 <line x1={view.histPxEnd} x2={view.histPxEnd}
@@ -1970,31 +1993,41 @@ function LivePriceChart({
                 >
                   {fmtPrice(liveProjection.endC)}
                 </text>
-                {/* PREDICTION LABEL inside the chart */}
+                {/* PREDICTION LABEL — pinned to the BOTTOM of the forecast
+                    zone so it never collides with the floating zoom controls
+                    in the top-right corner. */}
                 {(() => {
-                  const labelX = view.histPxEnd + (view.fcastPxEnd - view.histPxEnd) * 0.5;
-                  const labelY = view.y0 + 4;
+                  const boxW = isNarrow ? 116 : 150;
+                  const boxH = isNarrow ? 36 : 42;
+                  // Anchor the box near the right edge of the forecast zone
+                  // but keep it inside the chart area so it doesn't get
+                  // clipped on narrow screens.
+                  const labelCx = Math.min(
+                    view.fcastPxEnd - boxW / 2 - 2,
+                    view.histPxEnd + (view.fcastPxEnd - view.histPxEnd) * 0.5,
+                  );
+                  const labelY = view.y1 - boxH - 4;
                   const dirText = prediction?.direction ?? "NEUTRAL";
                   const changeStr = `${liveProjection.changePct >= 0 ? "+" : ""}${liveProjection.changePct.toFixed(2)}%`;
                   return (
                     <g pointerEvents="none">
                       <rect
-                        x={labelX - (isNarrow ? 56 : 72)}
+                        x={labelCx - boxW / 2}
                         y={labelY}
-                        width={isNarrow ? 112 : 144}
-                        height={isNarrow ? 38 : 44}
+                        width={boxW}
+                        height={boxH}
                         rx={6}
                         fill="hsl(var(--background))"
                         stroke={view.fcastColor}
                         strokeWidth={1}
                         opacity={0.92}
                       />
-                      <text x={labelX} y={labelY + (isNarrow ? 14 : 16)} textAnchor="middle"
+                      <text x={labelCx} y={labelY + (isNarrow ? 14 : 16)} textAnchor="middle"
                         fontSize={isNarrow ? "9" : "10"} fontFamily="monospace"
                         fill={view.fcastColor} fontWeight="bold" letterSpacing="1">
                         PREDICTION · {horizon.toUpperCase()}
                       </text>
-                      <text x={labelX} y={labelY + (isNarrow ? 28 : 33)} textAnchor="middle"
+                      <text x={labelCx} y={labelY + (isNarrow ? 27 : 31)} textAnchor="middle"
                         fontSize={isNarrow ? "10" : "12"} fontFamily="monospace"
                         fill="hsl(var(--foreground))" fontWeight="600">
                         {dirText} <tspan fill={view.fcastColor}>{changeStr}</tspan>
@@ -2002,13 +2035,6 @@ function LivePriceChart({
                     </g>
                   );
                 })()}
-                {/* target price label below the dot */}
-                {prediction?.targetPrice != null && (
-                  <text x={liveProjection.x2 - 6} y={liveProjection.y2 + 14} textAnchor="end"
-                    fontSize="10" fill={view.fcastColor} fontFamily="monospace" fontWeight="600">
-                    → {fmtPrice(prediction.targetPrice)}
-                  </text>
-                )}
               </g>
             )}
 
@@ -2119,7 +2145,7 @@ function LivePriceChart({
           </svg>
         )}
         </div>
-        {prediction?.targetPrice && livePrice != null && (
+        {showProjection && prediction?.targetPrice && livePrice != null && (
           <div className="mt-2 px-3 sm:px-0 text-xs text-muted-foreground flex items-center gap-3 flex-wrap">
             <span>
               Live projection · target {horizon}:{" "}
@@ -2130,6 +2156,24 @@ function LivePriceChart({
             </span>
             <span>·</span>
             <span>Updates every second · last call {new Date(prediction.createdAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "America/Phoenix" }) + " MST"}</span>
+          </div>
+        )}
+        {predictionStale && (
+          <div className="mt-2 px-3 sm:px-0 text-xs flex items-center gap-3 flex-wrap rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
+            <span className="text-amber-300">
+              Last prediction was for <span className="font-mono">{prediction!.horizon}</span> — switch back, or re-predict for the new <span className="font-mono">{horizon}</span> window so the chart targets are accurate.
+            </span>
+            {onRequestPredict && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 text-xs ml-auto"
+                onClick={onRequestPredict}
+                disabled={predicting}
+              >
+                {predicting ? "Predicting…" : `Predict ${horizon}`}
+              </Button>
+            )}
           </div>
         )}
       </CardContent>
