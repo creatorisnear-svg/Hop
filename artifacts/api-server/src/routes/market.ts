@@ -7,6 +7,8 @@ import {
   predictMarket,
   fetchYahooQuote,
   fetchYahooCandles,
+  fetchEarnings,
+  chatAboutMarket,
   evaluatePrediction,
   computeIndicators,
 } from "../lib/market";
@@ -15,9 +17,11 @@ import {
 const quoteCache = new Map<string, { ts: number; data: unknown }>();
 const candleCache = new Map<string, { ts: number; data: unknown }>();
 const indicatorCache = new Map<string, { ts: number; data: unknown }>();
+const earningsCache = new Map<string, { ts: number; data: unknown }>();
 const QUOTE_TTL_MS = 1500;
 const CANDLE_TTL_MS = 30_000;
 const INDICATOR_TTL_MS = 5 * 60_000;
+const EARNINGS_TTL_MS = 30 * 60_000;   // 30 minutes — earnings barely change intraday
 
 const router: IRouter = Router();
 
@@ -191,6 +195,11 @@ router.post("/market/watches/:id/predict", async (req, res) => {
         entryTrigger: result.entryTrigger,
         riskNote: result.riskNote,
         targetPrice: result.targetPrice,
+        bullCase: result.bullCase,
+        bearCase: result.bearCase,
+        keyDrivers: result.keyDrivers,
+        nextCatalysts: result.nextCatalysts,
+        earnings: result.earnings,
         model: result.model,
         durationMs: result.durationMs,
       })
@@ -229,6 +238,67 @@ router.get("/market/indicators/:symbol", async (req, res) => {
   const indicators = computeIndicators(symbol, closes);
   indicatorCache.set(symbol, { ts: now, data: indicators });
   res.json({ indicators });
+});
+
+router.get("/market/earnings/:symbol", async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  const now = Date.now();
+  const hit = earningsCache.get(symbol);
+  if (hit && now - hit.ts < EARNINGS_TTL_MS) {
+    return res.json({ earnings: hit.data });
+  }
+  const earnings = await fetchEarnings(symbol);
+  earningsCache.set(symbol, { ts: now, data: earnings });
+  res.json({ earnings });
+});
+
+router.post("/market/watches/:id/chat", async (req, res) => {
+  const id = req.params.id;
+  const body = (req.body ?? {}) as {
+    message?: string;
+    history?: Array<{ role?: string; content?: string }>;
+  };
+  const userMessage = String(body.message ?? "").trim();
+  if (!userMessage) {
+    return res.status(400).json({ error: "message is required" });
+  }
+  const [watch] = await db
+    .select()
+    .from(marketWatchesTable)
+    .where(eq(marketWatchesTable.id, id))
+    .limit(1);
+  if (!watch) return res.status(404).json({ error: "watch not found" });
+
+  const history = (body.history ?? [])
+    .filter((m): m is { role: string; content: string } =>
+      typeof m?.content === "string" && (m.role === "user" || m.role === "assistant"),
+    )
+    .map((m) => ({
+      role: m.role as "user" | "assistant",
+      content: m.content,
+    }));
+
+  try {
+    const result = await chatAboutMarket(
+      {
+        symbol: watch.symbol,
+        name: watch.name,
+        market: watch.market,
+        notes: watch.notes,
+      },
+      history,
+      userMessage,
+    );
+    res.json({
+      reply: { role: "assistant", content: result.reply },
+      model: result.model,
+      durationMs: result.durationMs,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ err, watchId: id }, "market chat failed");
+    res.status(500).json({ error: msg });
+  }
 });
 
 router.get("/market/candles/:symbol", async (req, res) => {

@@ -26,6 +26,11 @@ import {
   LineChart,
   ExternalLink,
   Activity,
+  CalendarClock,
+  MessageSquare,
+  Send,
+  Target,
+  Flame,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -73,10 +78,43 @@ interface Prediction {
   entryTrigger: string;
   riskNote: string;
   targetPrice: number | null;
+  bullCase?: string;
+  bearCase?: string;
+  keyDrivers?: string[];
+  nextCatalysts?: string[];
+  earnings?: Earnings | null;
   model: string;
   durationMs: number;
   createdAt: string;
   evaluation?: PredictionEvaluation;
+}
+
+interface EarningsRow {
+  date: string;
+  fiscalQuarter: string;
+  fiscalYear: number | null;
+  epsActual: number | null;
+  epsEstimate: number | null;
+  revenueActual: number | null;
+  revenueEstimate: number | null;
+  surprisePct: number | null;
+  scheduled: boolean;
+}
+
+interface Earnings {
+  symbol: string;
+  currency: string | null;
+  history: EarningsRow[];
+  q1Latest: EarningsRow | null;
+  next: EarningsRow | null;
+  fetchedAt: string;
+  source: "yahoo" | "unavailable";
+}
+
+interface ChatMsg {
+  role: "user" | "assistant";
+  content: string;
+  ts: number;
 }
 
 interface HeadlineWithSentiment {
@@ -375,6 +413,8 @@ function WatchDetail({ watch }: { watch: Watch }) {
   const [predictions, setPredictions] = useState<Prediction[]>([]);
   const [trackRecord, setTrackRecord] = useState<TrackRecord | null>(null);
   const [indicators, setIndicators] = useState<Indicators | null>(null);
+  const [earnings, setEarnings] = useState<Earnings | null>(null);
+  const [earningsLoading, setEarningsLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [predicting, setPredicting] = useState(false);
   const [horizon, setHorizon] = useState("1w");
@@ -400,7 +440,27 @@ function WatchDetail({ watch }: { watch: Watch }) {
     }
   }, [watch.id, watch.symbol]);
 
+  // Earnings have their own slower cadence — fetched once per watch + on
+  // refresh, with a 30-min server-side cache.
+  const loadEarnings = useCallback(async () => {
+    setEarningsLoading(true);
+    try {
+      const r = await fetch(`/api/market/earnings/${encodeURIComponent(watch.symbol)}`);
+      if (!r.ok) {
+        setEarnings(null);
+      } else {
+        const data = await r.json();
+        setEarnings((data.earnings as Earnings | undefined) ?? null);
+      }
+    } catch {
+      setEarnings(null);
+    } finally {
+      setEarningsLoading(false);
+    }
+  }, [watch.symbol]);
+
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void loadEarnings(); }, [loadEarnings]);
 
   // Auto-refresh evaluations every 30s so badges flip live as the price moves.
   useEffect(() => {
@@ -475,6 +535,11 @@ function WatchDetail({ watch }: { watch: Watch }) {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <TrackRecordCard track={trackRecord} loading={loading} />
         <IndicatorsCard indicators={indicators} loading={loading} />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr] gap-4">
+        <EarningsCard earnings={earnings} loading={earningsLoading} onRefresh={loadEarnings} watchMarket={watch.market} />
+        <MarketChat watch={watch} />
       </div>
 
       {latest && <PredictionCard prediction={latest} headline />}
@@ -1276,6 +1341,59 @@ function PredictionCard({ prediction, headline }: { prediction: Prediction; head
 
         <div className="text-base font-medium leading-snug">{prediction.summary}</div>
 
+        {(prediction.bullCase || prediction.bearCase) && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+            {prediction.bullCase && (
+              <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
+                <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-emerald-400">
+                  <TrendingUp className="w-3.5 h-3.5" /> Bull case
+                </div>
+                <p className="text-sm text-foreground/90 mt-1.5 leading-relaxed">{prediction.bullCase}</p>
+              </div>
+            )}
+            {prediction.bearCase && (
+              <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3">
+                <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-red-400">
+                  <TrendingDown className="w-3.5 h-3.5" /> Bear case
+                </div>
+                <p className="text-sm text-foreground/90 mt-1.5 leading-relaxed">{prediction.bearCase}</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {(prediction.keyDrivers && prediction.keyDrivers.length > 0) && (
+          <div className="rounded-lg border border-border/60 p-3">
+            <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
+              <Target className="w-3.5 h-3.5" /> Key drivers
+            </div>
+            <ul className="mt-1.5 space-y-1">
+              {prediction.keyDrivers.map((d, i) => (
+                <li key={i} className="text-sm text-foreground/90 flex gap-2">
+                  <span className="text-muted-foreground mt-1">•</span>
+                  <span>{d}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {(prediction.nextCatalysts && prediction.nextCatalysts.length > 0) && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+            <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-amber-400">
+              <Flame className="w-3.5 h-3.5" /> Next catalysts
+            </div>
+            <ul className="mt-1.5 space-y-1">
+              {prediction.nextCatalysts.map((c, i) => (
+                <li key={i} className="text-sm text-foreground/90 flex gap-2">
+                  <span className="text-amber-500/70 mt-1">•</span>
+                  <span>{c}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {prediction.quote && (
           <div className="text-xs text-muted-foreground font-mono">
             Quote at run: {prediction.quote.price ?? "n/a"}
@@ -1332,6 +1450,297 @@ function PredictionCard({ prediction, headline }: { prediction: Prediction; head
 
         <div className="text-[10px] text-muted-foreground font-mono">
           model: {prediction.model} · {prediction.durationMs} ms
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Earnings panel ──────────────────────────────────────────────────────────
+function fmtMoney(v: number | null, currency: string | null) {
+  if (v == null || !Number.isFinite(v)) return "—";
+  if (Math.abs(v) >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(2)}B ${currency ?? ""}`.trim();
+  if (Math.abs(v) >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M ${currency ?? ""}`.trim();
+  return `${v.toFixed(2)} ${currency ?? ""}`.trim();
+}
+function fmtEps(v: number | null) {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return `$${v.toFixed(2)}`;
+}
+function fmtDate(d: string | null | undefined) {
+  if (!d) return "—";
+  const dt = new Date(d);
+  if (Number.isNaN(dt.getTime())) return d;
+  return dt.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+function EarningsCard({
+  earnings,
+  loading,
+  onRefresh,
+  watchMarket,
+}: {
+  earnings: Earnings | null;
+  loading: boolean;
+  onRefresh: () => void;
+  watchMarket: string;
+}) {
+  const isStockLike = watchMarket === "stock" || watchMarket === "etf";
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="text-base flex items-center gap-2">
+            <CalendarClock className="w-4 h-4 text-primary" /> Q1 Earnings
+          </CardTitle>
+          <Button size="sm" variant="ghost" onClick={onRefresh} disabled={loading} className="h-7 w-7 p-0">
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+          </Button>
+        </div>
+        <CardDescription className="text-xs">
+          Latest fiscal Q1 result + next scheduled report
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {!isStockLike ? (
+          <div className="text-xs text-muted-foreground">
+            Earnings only apply to stocks and ETFs.
+          </div>
+        ) : loading ? (
+          <div className="text-xs text-muted-foreground flex items-center gap-2">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading earnings…
+          </div>
+        ) : !earnings || earnings.source === "unavailable" ? (
+          <div className="text-xs text-muted-foreground">
+            Earnings data is currently unavailable for this symbol.
+          </div>
+        ) : (
+          <>
+            {earnings.q1Latest ? (
+              <div className="rounded-lg border border-primary/30 bg-primary/5 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[11px] uppercase font-bold tracking-wide text-primary">
+                    {earnings.q1Latest.fiscalQuarter}
+                    {earnings.q1Latest.fiscalYear ? ` ${earnings.q1Latest.fiscalYear}` : ""}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground font-mono">
+                    {fmtDate(earnings.q1Latest.date)}
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3 mt-2 text-sm">
+                  <div>
+                    <div className="text-[10px] uppercase text-muted-foreground">EPS actual</div>
+                    <div className="font-mono font-bold">{fmtEps(earnings.q1Latest.epsActual)}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase text-muted-foreground">EPS estimate</div>
+                    <div className="font-mono">{fmtEps(earnings.q1Latest.epsEstimate)}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase text-muted-foreground">Revenue</div>
+                    <div className="font-mono">{fmtMoney(earnings.q1Latest.revenueActual, earnings.currency)}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase text-muted-foreground">Surprise</div>
+                    <div
+                      className={`font-mono font-bold ${
+                        earnings.q1Latest.surprisePct == null
+                          ? ""
+                          : earnings.q1Latest.surprisePct >= 0
+                            ? "text-emerald-400"
+                            : "text-red-400"
+                      }`}
+                    >
+                      {earnings.q1Latest.surprisePct == null
+                        ? "—"
+                        : `${earnings.q1Latest.surprisePct >= 0 ? "+" : ""}${earnings.q1Latest.surprisePct.toFixed(2)}%`}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="text-xs text-muted-foreground">No fiscal Q1 result on file yet.</div>
+            )}
+
+            {earnings.next && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[11px] uppercase font-bold tracking-wide text-amber-400">
+                    Next: {earnings.next.fiscalQuarter}
+                    {earnings.next.fiscalYear ? ` ${earnings.next.fiscalYear}` : ""}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground font-mono">
+                    {fmtDate(earnings.next.date)}
+                  </div>
+                </div>
+                {earnings.next.epsEstimate != null && (
+                  <div className="mt-1.5 text-xs text-muted-foreground">
+                    EPS estimate <span className="font-mono text-foreground">{fmtEps(earnings.next.epsEstimate)}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {earnings.history && earnings.history.length > 0 && (
+              <div className="pt-1">
+                <div className="text-[10px] uppercase font-semibold text-muted-foreground mb-1">Recent quarters</div>
+                <div className="space-y-1">
+                  {earnings.history.slice(0, 4).map((row, i) => (
+                    <div
+                      key={`${row.date}-${i}`}
+                      className="flex items-center justify-between text-xs font-mono border-b border-border/30 pb-1 last:border-0"
+                    >
+                      <span className="text-muted-foreground">
+                        {row.fiscalQuarter}
+                        {row.fiscalYear ? ` ${row.fiscalYear}` : ""}
+                      </span>
+                      <span>{fmtEps(row.epsActual)} <span className="opacity-60">vs {fmtEps(row.epsEstimate)}</span></span>
+                      <span
+                        className={
+                          row.surprisePct == null
+                            ? "text-muted-foreground"
+                            : row.surprisePct >= 0
+                              ? "text-emerald-400"
+                              : "text-red-400"
+                        }
+                      >
+                        {row.surprisePct == null
+                          ? "—"
+                          : `${row.surprisePct >= 0 ? "+" : ""}${row.surprisePct.toFixed(1)}%`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Chat with AI about the current asset ────────────────────────────────────
+function MarketChat({ watch }: { watch: Watch }) {
+  const [messages, setMessages] = useState<ChatMsg[]>([]);
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const scrollRef = React.useRef<HTMLDivElement>(null);
+
+  // Reset the conversation when the user switches watch.
+  useEffect(() => {
+    setMessages([]);
+    setInput("");
+  }, [watch.id]);
+
+  // Keep the transcript pinned to the bottom as it grows.
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages, sending]);
+
+  const send = useCallback(async () => {
+    const text = input.trim();
+    if (!text || sending) return;
+    const userMsg: ChatMsg = { role: "user", content: text, ts: Date.now() };
+    const history = messages.map((m) => ({ role: m.role, content: m.content }));
+    setMessages((prev) => [...prev, userMsg]);
+    setInput("");
+    setSending(true);
+    try {
+      const r = await fetch(`/api/market/watches/${watch.id}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text, history }),
+      });
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        throw new Error(data?.error ?? `chat failed (${r.status})`);
+      }
+      const data = await r.json();
+      const reply: ChatMsg = {
+        role: "assistant",
+        content: String(data?.reply?.content ?? ""),
+        ts: Date.now(),
+      };
+      setMessages((prev) => [...prev, reply]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`Chat failed: ${msg}`);
+      // Roll back the optimistic user message so they can retry.
+      setMessages((prev) => prev.filter((m) => m !== userMsg));
+      setInput(text);
+    } finally {
+      setSending(false);
+    }
+  }, [input, sending, messages, watch.id]);
+
+  const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void send();
+    }
+  };
+
+  return (
+    <Card className="flex flex-col">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex items-center gap-2">
+          <MessageSquare className="w-4 h-4 text-primary" /> Ask about {watch.symbol}
+        </CardTitle>
+        <CardDescription className="text-xs">
+          Live chat — pulls fresh quote, headlines, and earnings on every reply.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex-1 flex flex-col gap-3">
+        <div
+          ref={scrollRef}
+          className="flex-1 min-h-[180px] max-h-[320px] overflow-y-auto rounded-md border border-border/60 bg-background/40 p-3 space-y-2.5 text-sm"
+        >
+          {messages.length === 0 && !sending && (
+            <div className="text-xs text-muted-foreground italic">
+              Try: "What's driving the move today?", "Should I worry about earnings?", or
+              "Give me a price target with conditions."
+            </div>
+          )}
+          {messages.map((m, i) => (
+            <div
+              key={i}
+              className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+            >
+              <div
+                className={`max-w-[85%] rounded-lg px-3 py-2 leading-relaxed whitespace-pre-wrap ${
+                  m.role === "user"
+                    ? "bg-primary/15 border border-primary/30 text-foreground"
+                    : "bg-muted/40 border border-border/50 text-foreground"
+                }`}
+              >
+                {m.content}
+              </div>
+            </div>
+          ))}
+          {sending && (
+            <div className="flex justify-start">
+              <div className="rounded-lg px-3 py-2 bg-muted/40 border border-border/50 text-xs text-muted-foreground flex items-center gap-2">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Thinking…
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="flex gap-2">
+          <Textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={onKey}
+            placeholder={`Ask anything about ${watch.symbol}…`}
+            rows={2}
+            className="resize-none text-sm"
+            disabled={sending}
+          />
+          <Button onClick={() => void send()} disabled={sending || !input.trim()} className="self-end">
+            {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+          </Button>
         </div>
       </CardContent>
     </Card>
