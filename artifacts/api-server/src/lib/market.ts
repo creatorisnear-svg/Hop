@@ -1359,7 +1359,7 @@ D. Compute targetPrice with this CALIBRATED expected-value formula, NOT a guess:
    WORKED EXAMPLE — crypto "1d", vol=4%, confidence=0.7:
      1.5 * 0.04 * sqrt(1) * (0.25 + 0.4*0.7) ≈ 3.2% → a calibrated 1d crypto target.
    A target smaller than 0.15% on any horizon is useless for puts/calls (premium decay
-   will eat the trade). If your computed move is < 0.15%, drop confidence below 0.55 so
+   will eat the trade). If your computed move is < 0.15%, drop confidence below 0.62 so
    action becomes HOLD. Never emit a near-zero target with high confidence — that's worse
    than no signal at all. Never inflate a low-conviction target to look "tradeable" — the
    server will floor it for you ONLY when confidence ≥ 0.70.
@@ -1388,9 +1388,16 @@ horizon is "1h", "4h", or "1d", treat this as an intraday options scalp:
 For longer horizons ("1w", "1m", "3m"), behave normally: weekly/monthly contracts,
 strikes can be 1-2 OTM, expiries 7-45 DTE depending on horizon.
 E. Translate to options signal:
-   - BUY_CALL when BULLISH and confidence ≥ 0.55
-   - BUY_PUT when BEARISH and confidence ≥ 0.55
-   - HOLD otherwise
+   - BUY_CALL when BULLISH and confidence ≥ 0.62 (raised from 0.55 — a near-coin-flip is NOT a trade)
+   - BUY_PUT when BEARISH and confidence ≥ 0.62
+   - HOLD otherwise — and HOLD is the correct, professional answer when the
+     setup is unclear. The server enforces a SIGNAL-ALIGNMENT-GATE that
+     forces HOLD if fewer than 3 of 5 independent channels (SuperTrend, SMA
+     trend, RSI momentum, volume/money flow, news tone) agree with your
+     direction. So before emitting BUY_CALL/BUY_PUT, sanity-check yourself:
+     do at least 3 of those 5 channels actually agree? If not, set
+     direction NEUTRAL and action HOLD honestly — don't try to fight the
+     gate by inflating confidence.
 F. Recommend strike (ATM / slightly-OTM / slightly-ITM) and expiry that fits the horizon.
 G. Give a clear "entry trigger" — observable condition (e.g. "Close above $275" or "If pre-market dips below $268").
 H. One-line risk note for what would invalidate the thesis.
@@ -1418,7 +1425,7 @@ Respond with STRICT JSON only, matching this shape:
 }
 
 Rules:
-- If confidence < 0.55, action MUST be "HOLD".
+- If confidence < 0.62, action MUST be "HOLD".
 - BUY_CALL only with BULLISH direction, BUY_PUT only with BEARISH.
 - Do not invent the strike price — base strike hints on the live quote shown.
 - targetPrice MUST obey the horizon CAP in step D — there is server-side enforcement, but if you exceed it your number gets trimmed and looks unprofessional. Stay inside the cap.
@@ -1899,8 +1906,124 @@ Rules:
         `is itself a strong sign the setup is unclear.]`;
     }
 
+    // ── SIGNAL-ALIGNMENT GATE ──────────────────────────────────────────────
+    // The single biggest source of "AI is wrong" complaints is issuing
+    // directional calls on weak setups where only 1-2 signals support the
+    // call. Require AT LEAST 3 OF 5 independent technical/sentiment signals
+    // to agree with the predicted direction before we issue a CALL/PUT.
+    // The 5 channels (deliberately uncorrelated):
+    //   1. SuperTrend regime  — primary trend filter
+    //   2. SMA trend score     — multi-period structural trend
+    //   3. RSI14 momentum      — short-term momentum
+    //   4. Volume / money flow — accumulation vs distribution + OBV
+    //   5. News sentiment      — net headline tone (bullish vs bearish count)
+    if (indicators && action !== "HOLD") {
+      // Score each channel as +1 / 0 / -1 toward BULLISH.
+      const ch: { name: string; score: number; note: string }[] = [];
+
+      // 1. SuperTrend regime
+      const sd = indicators.superTrendDir;
+      if (sd === "up")        ch.push({ name: "SuperTrend",  score: +1, note: "UP regime" });
+      else if (sd === "down") ch.push({ name: "SuperTrend",  score: -1, note: "DOWN regime" });
+      else                    ch.push({ name: "SuperTrend",  score:  0, note: "n/a" });
+
+      // 2. Multi-period trend
+      const ts = indicators.trendScore;
+      if (ts != null && ts >=  2)      ch.push({ name: "SMA trend",   score: +1, note: `score ${ts}` });
+      else if (ts != null && ts <= -2) ch.push({ name: "SMA trend",   score: -1, note: `score ${ts}` });
+      else if (ts != null && ts >  0)  ch.push({ name: "SMA trend",   score: +1, note: `score +${ts}` });
+      else if (ts != null && ts <  0)  ch.push({ name: "SMA trend",   score: -1, note: `score ${ts}` });
+      else                             ch.push({ name: "SMA trend",   score:  0, note: "flat" });
+
+      // 3. RSI momentum (avoid +/- on extremes — those are reversion zones)
+      const rsi = indicators.rsi14;
+      if (rsi != null && rsi >= 55 && rsi < 75)      ch.push({ name: "RSI mom.", score: +1, note: `RSI ${rsi.toFixed(0)}` });
+      else if (rsi != null && rsi <= 45 && rsi > 25) ch.push({ name: "RSI mom.", score: -1, note: `RSI ${rsi.toFixed(0)}` });
+      else if (rsi != null && rsi >= 75)             ch.push({ name: "RSI mom.", score: -1, note: `RSI ${rsi.toFixed(0)} overbought (reversion risk)` });
+      else if (rsi != null && rsi <= 25)             ch.push({ name: "RSI mom.", score: +1, note: `RSI ${rsi.toFixed(0)} oversold (reversion bid)` });
+      else                                           ch.push({ name: "RSI mom.", score:  0, note: "neutral" });
+
+      // 4. Volume / money flow — combine accumulation + OBV
+      const ud = indicators.upDayVolumeRatio;
+      const ob = indicators.obvSlope10dPct;
+      let volScore = 0;
+      const volBits: string[] = [];
+      if (ud != null) {
+        if (ud >= 1.3) { volScore += 1; volBits.push(`up/down vol ${ud.toFixed(2)}`); }
+        else if (ud <= 0.77) { volScore -= 1; volBits.push(`up/down vol ${ud.toFixed(2)}`); }
+      }
+      if (ob != null) {
+        if (ob >= 8) { volScore += 1; volBits.push(`OBV +${ob.toFixed(0)}%`); }
+        else if (ob <= -8) { volScore -= 1; volBits.push(`OBV ${ob.toFixed(0)}%`); }
+      }
+      const volFinal = volScore > 0 ? +1 : volScore < 0 ? -1 : 0;
+      ch.push({ name: "Volume flow", score: volFinal, note: volBits.length ? volBits.join(", ") : "n/a" });
+
+      // 5. News sentiment — net headline tone
+      let bull = 0, bear = 0;
+      for (const h of headlines) {
+        if (h.sentiment === "BULLISH") bull++;
+        else if (h.sentiment === "BEARISH") bear++;
+      }
+      const netNews = bull - bear;
+      if (netNews >= 2)      ch.push({ name: "News tone",   score: +1, note: `${bull}↑ vs ${bear}↓` });
+      else if (netNews <= -2) ch.push({ name: "News tone",  score: -1, note: `${bull}↑ vs ${bear}↓` });
+      else                    ch.push({ name: "News tone",  score:  0, note: `${bull}↑ vs ${bear}↓ (mixed)` });
+
+      // Count signals aligned with the predicted direction.
+      const sign = direction === "BULLISH" ? 1 : direction === "BEARISH" ? -1 : 0;
+      const aligned   = ch.filter((c) => sign !== 0 && c.score === sign).length;
+      const opposed   = ch.filter((c) => sign !== 0 && c.score === -sign).length;
+      const neutralCh = ch.filter((c) => c.score === 0).length;
+
+      // Build a one-line breakdown for transparency.
+      const breakdown = ch
+        .map((c) => `${c.name}: ${c.score > 0 ? "+" : c.score < 0 ? "−" : "·"} (${c.note})`)
+        .join(" | ");
+
+      if (sign !== 0 && aligned < 3) {
+        action = "HOLD";
+        reasoning = `${reasoning}\n\n[SIGNAL-ALIGNMENT-GATE: only ${aligned}/5 independent channels support ${direction} ` +
+          `(${opposed} oppose, ${neutralCh} neutral) — forcing HOLD. A directional trade requires ≥3/5. ` +
+          `Channel breakdown → ${breakdown}.]`;
+      } else if (sign !== 0 && opposed >= 3) {
+        // Even if 3 align, if 3+ oppose (mathematically impossible w/ 5
+        // channels but defensive in case we expand) it's a contradiction.
+        action = "HOLD";
+        reasoning = `${reasoning}\n\n[SIGNAL-ALIGNMENT-GATE: ${opposed}/5 channels OPPOSE ${direction} ` +
+          `— forcing HOLD. ${breakdown}.]`;
+      } else if (sign !== 0) {
+        // Aligned — surface the breakdown so the user understands the conviction.
+        reasoning = `${reasoning}\n\n[SIGNAL-ALIGNMENT: ${aligned}/5 channels support ${direction} ` +
+          `(${opposed} oppose, ${neutralCh} neutral). ${breakdown}.]`;
+      }
+    }
+
+    // ── SKILL-VETO GATE ────────────────────────────────────────────────────
+    // If we have a meaningful sample of past predictions on THIS specific
+    // watch and the system has demonstrably been wrong more often than
+    // right, refuse to issue a fresh directional call. The system simply
+    // doesn't have edge on this ticker — saying so honestly is the right
+    // user experience.
+    {
+      const settled = (args.pastResults ?? []).filter(
+        (r) => r.status === "CORRECT" || r.status === "WRONG" || r.status === "TARGET_HIT",
+      );
+      if (settled.length >= 10 && action !== "HOLD") {
+        const correct = settled.filter((r) => r.status === "CORRECT" || r.status === "TARGET_HIT").length;
+        const acc = correct / settled.length;
+        if (acc < 0.50) {
+          action = "HOLD";
+          reasoning = `${reasoning}\n\n[SKILL-VETO: historical accuracy on this ticker is ` +
+            `${correct}/${settled.length} = ${Math.round(acc * 100)}% (below 50% over a meaningful sample). ` +
+            `The system has not demonstrated edge here — forcing HOLD until accuracy recovers.]`;
+        }
+      }
+    }
+
     // Safety: enforce the rules the model is supposed to follow itself.
-    if (confidence < 0.55) action = "HOLD";
+    // Bumped from 0.55 → 0.62 — a near-coin-flip is not a trade.
+    if (confidence < 0.62) action = "HOLD";
     if (action === "BUY_CALL" && direction !== "BULLISH") action = "HOLD";
     if (action === "BUY_PUT" && direction !== "BEARISH") action = "HOLD";
 
