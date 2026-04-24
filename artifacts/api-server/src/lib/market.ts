@@ -341,15 +341,29 @@ export interface OptionsPositioning {
   ivSkew: number | null;           // (put IV - call IV) percentage points; >0 = puts bid (fear)
 }
 export async function fetchOptionsPositioning(symbol: string): Promise<OptionsPositioning | null> {
-  const url = `https://query1.finance.yahoo.com/v7/finance/options/${encodeURIComponent(symbol)}`;
+  // Yahoo's options endpoint now requires the same crumb auth as quoteSummary.
+  // Without it every call returns "Unauthorized: Invalid Crumb" — which is
+  // exactly what was happening before this fix (the model kept saying "options
+  // data unavailable" even though we were calling it).
+  const auth = await getYahooCrumb();
+  const baseUrl = `https://query1.finance.yahoo.com/v7/finance/options/${encodeURIComponent(symbol)}`;
+  const url = auth ? `${baseUrl}?crumb=${encodeURIComponent(auth.crumb)}` : baseUrl;
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 8_000);
   try {
     const res = await fetch(url, {
       signal: ctrl.signal,
-      headers: { "user-agent": "Mozilla/5.0 NeuroLinkedBrain/1.0" },
+      headers: {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        accept: "*/*",
+        referer: "https://finance.yahoo.com/",
+        ...(auth ? { cookie: auth.cookie } : {}),
+      },
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      logger.warn({ status: res.status, symbol }, "options chain fetch failed");
+      return null;
+    }
     const data = (await res.json()) as {
       optionChain?: {
         result?: Array<{
@@ -574,11 +588,22 @@ function quarterFromDate(d: Date): string {
 // We fetch them once and cache for ~30 minutes.
 let yahooCrumbCache: { crumb: string; cookie: string; at: number } | null = null;
 const CRUMB_TTL_MS = 30 * 60_000;
+// Negative cache: when Yahoo 429s our crumb fetch, remember that for a few
+// minutes so we don't immediately re-hammer them on every prediction (which
+// just gets us 429d more aggressively). 5 min is short enough that production
+// recovers quickly when Yahoo lifts the limit.
+let yahooCrumbFailureUntil = 0;
+const CRUMB_NEG_TTL_MS = 5 * 60_000;
 
 async function getYahooCrumb(): Promise<{ crumb: string; cookie: string } | null> {
   const now = Date.now();
   if (yahooCrumbCache && now - yahooCrumbCache.at < CRUMB_TTL_MS) {
     return { crumb: yahooCrumbCache.crumb, cookie: yahooCrumbCache.cookie };
+  }
+  if (now < yahooCrumbFailureUntil) {
+    // Recently 429d — don't bother trying again, just signal "no crumb" so
+    // callers fall through to their unauthenticated path (or skip the call).
+    return null;
   }
   const ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
   const baseHeaders = {
@@ -624,12 +649,14 @@ async function getYahooCrumb(): Promise<{ crumb: string; cookie: string } | null
         return null;
       }
       yahooCrumbCache = { crumb, cookie, at: now };
+      yahooCrumbFailureUntil = 0;
       return { crumb, cookie };
     } catch (err) {
       logger.warn({ err, attempt }, "yahoo crumb error");
       await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
     }
   }
+  yahooCrumbFailureUntil = Date.now() + CRUMB_NEG_TTL_MS;
   return null;
 }
 
@@ -1272,18 +1299,20 @@ Respond with STRICT JSON only, matching this shape:
   "nextCatalysts": [<1-3 short bullet strings naming an event + approx date if known>],
   "headlineSentiments": [<one entry per headline above in order: "BULLISH" | "BEARISH" | "NEUTRAL">],
   "summary": "<one-sentence punchy verdict>",
-  "reasoning": "<3-6 sentences citing the headlines by [n] when possible AND the Q1 / next earnings if relevant>"
+  "reasoning": "<4-7 sentences. MUST EXPLICITLY cite: (1) the SPY/QQQ relative-strength read from BROADER MARKET TODAY, (2) the put/call ratio or IV skew from OPTIONS-MARKET POSITIONING, (3) intraday RSI / VWAP from the technicals block, (4) at least one headline by [n]. Skipping any of these = the prediction is incomplete>"
 }
 
 Rules:
 - If confidence < 0.55, action MUST be "HOLD".
 - BUY_CALL only with BULLISH direction, BUY_PUT only with BEARISH.
 - Do not invent the strike price — base strike hints on the live quote shown.
-- targetPrice MUST follow the volatility formula in step D. Round to a reasonable tick (e.g. $0.50 for stocks > $50, $0.10 for crypto < $5). NEVER more than 20% from live price.
+- targetPrice MUST obey the horizon CAP in step D — there is server-side enforcement, but if you exceed it your number gets trimmed and looks unprofessional. Stay inside the cap.
+- targetPrice MUST follow the volatility formula in step D. Round to a reasonable tick (e.g. $0.50 for stocks > $50, $0.10 for crypto < $5).
 - If volatility20d is unavailable, assume 1.5% daily vol for stocks/ETFs, 4% for crypto.
 - If earnings were unavailable, you may say so in reasoning but still produce the forecast.
-- Cite headlines by [n] when you reference them; cite specific numbers (RSI value, % change, SMA price) when you cite technicals.
-- Reasoning must mention at least 2 of: trend signal, momentum signal, RSI/52w position, earnings context, news tone.
+- Cite headlines by [n] when you reference them; cite specific numbers (RSI value, % change, SMA price, put/call ratio) when you cite technicals or positioning.
+- For 1h / 4h horizons: weight intraday RSI(5m), VWAP, options put/call flow, and SPY relative-strength FAR more than weekly/monthly trends. The latter barely move within 1 hour.
+- For 1w / 1m / 3m horizons: weight daily/weekly trend, earnings, and headline themes more than intraday noise.
 - No prose outside the JSON.`;
 
   // ── PARSING HELPERS (shared across ensemble runs) ────────────────────────

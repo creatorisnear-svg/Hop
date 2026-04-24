@@ -23,6 +23,12 @@ import { runBacktest } from "../lib/marketBacktest";
 const quoteCache = new Map<string, { ts: number; data: unknown }>();
 const candleCache = new Map<string, { ts: number; data: unknown }>();
 const indicatorCache = new Map<string, { ts: number; data: unknown }>();
+
+// Allowed horizons. MUST match the keys in HORIZON_TARGET_CAP / HORIZON_TARGET_FLOOR
+// inside lib/market.ts — otherwise a 1h request gets silently coerced to 1w
+// and the cap/floor maths target the wrong envelope. This was the cause of
+// 1h scalp predictions returning 1w-sized targets.
+const ALLOWED_HORIZONS = ["1h", "4h", "1d", "1w", "2w", "1m", "3m"] as const;
 const earningsCache = new Map<string, { ts: number; data: unknown }>();
 const QUOTE_TTL_MS = 1500;
 const CANDLE_TTL_MS = 30_000;
@@ -163,7 +169,7 @@ router.get("/market/watches/:id/predictions", async (req, res) => {
 router.post("/market/watches/:id/predict", async (req, res) => {
   const id = req.params.id;
   const horizonInput = (req.body?.horizon as string | undefined)?.trim() || "1w";
-  const horizon = ["1d", "1w", "1m", "3m"].includes(horizonInput) ? horizonInput : "1w";
+  const horizon = (ALLOWED_HORIZONS as readonly string[]).includes(horizonInput) ? horizonInput : "1w";
 
   const [watch] = await db
     .select()
@@ -688,7 +694,10 @@ router.post("/market/trades", async (req, res) => {
       action,
       entryPrice,
       targetPrice: body.targetPrice ?? null,
-      horizon: (body.horizon ?? "1w").trim() || "1w",
+      horizon: ((): string => {
+        const h = (body.horizon ?? "").trim();
+        return (ALLOWED_HORIZONS as readonly string[]).includes(h) ? h : "1w";
+      })(),
       strikeHint: (body.strikeHint ?? "").trim(),
       expiryHint: (body.expiryHint ?? "").trim(),
       quantity: Number.isFinite(Number(body.quantity)) ? Number(body.quantity) : 1,
@@ -748,7 +757,7 @@ router.post("/market/watches/:id/backtest", async (req, res) => {
   if (!watch) return res.status(404).json({ error: "watch not found" });
 
   const horizonInput = (req.body?.horizon as string | undefined)?.trim() || "1w";
-  const horizon = ["1d", "1w", "1m", "3m"].includes(horizonInput) ? horizonInput : "1w";
+  const horizon = (ALLOWED_HORIZONS as readonly string[]).includes(horizonInput) ? horizonInput : "1w";
   const lookbackRaw = Number(req.body?.lookback);
   const lookback = Number.isFinite(lookbackRaw) ? Math.max(10, Math.min(60, Math.floor(lookbackRaw))) : 30;
 
