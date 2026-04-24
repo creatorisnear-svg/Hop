@@ -142,6 +142,67 @@ export function JarvisChat() {
     }
   }, [open]);
 
+  // Poll a brain run to completion, then post its final answer into chat.
+  const watchedRunsRef = useRef<Set<string>>(new Set());
+  const watchRunAndAnnounce = useCallback((runId: string) => {
+    if (watchedRunsRef.current.has(runId)) return;
+    watchedRunsRef.current.add(runId);
+
+    // Insert a placeholder card so the user sees the run is being tracked.
+    const placeholderId = `run-watch-${runId}`;
+    setMessages((m) => [
+      ...m,
+      {
+        id: placeholderId,
+        role: "assistant",
+        content: `⏳ Brain run started — watching for the result…`,
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+
+    let attempts = 0;
+    const MAX_ATTEMPTS = 180; // 6 min @ 2s
+    const tick = async () => {
+      attempts += 1;
+      try {
+        const resp = await fetch(`/api/runs/${runId}`);
+        if (resp.ok) {
+          const data = await resp.json();
+          const run = data?.run;
+          const status: string | undefined = run?.status;
+          if (status === "succeeded" || status === "failed" || status === "cancelled") {
+            const final =
+              status === "succeeded"
+                ? run.finalAnswer || "(Run finished but produced no final answer.)"
+                : status === "failed"
+                  ? `Brain run failed: ${run.error || "unknown error"}`
+                  : `Brain run cancelled.`;
+            const announcement: ChatMessage = {
+              id: `run-done-${runId}`,
+              role: "assistant",
+              content: `${status === "succeeded" ? "✅" : status === "failed" ? "❌" : "⛔"} ${final}\n\n[View full transcript](#/run/${runId})`,
+              createdAt: new Date().toISOString(),
+            };
+            setMessages((m) => [...m.filter((msg) => msg.id !== placeholderId), announcement]);
+            qc.invalidateQueries();
+            if (status === "succeeded" && voiceReply && run.finalAnswer) {
+              setSpeaking(true);
+              speak(run.finalAnswer, {
+                onStart: () => setSpeaking(true),
+                onEnd: () => setSpeaking(false),
+              });
+            }
+            return;
+          }
+        }
+      } catch {
+        // ignore network blip; keep polling
+      }
+      if (attempts < MAX_ATTEMPTS) setTimeout(tick, 2000);
+    };
+    setTimeout(tick, 1500);
+  }, [qc, voiceReply]);
+
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
       const el = scrollRef.current;
@@ -229,6 +290,13 @@ export function JarvisChat() {
               "inject_run_step", "replace_upcoming_steps", "fire_webhook_event"];
             if (mutating.includes(payload.name)) {
               qc.invalidateQueries();
+            }
+            // If Jarvis just started a brain run, kick off a watcher that
+            // posts the result back into the chat when the run completes.
+            if (payload.name === "start_run" && payload.ok) {
+              const r = payload.result as { runId?: string; id?: string } | null;
+              const newRunId = r?.runId ?? r?.id;
+              if (newRunId) watchRunAndAnnounce(newRunId);
             }
           } else if (evtType === "assistant_text") {
             setStreamingText(payload.text ?? "");

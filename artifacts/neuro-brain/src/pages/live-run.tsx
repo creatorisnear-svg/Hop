@@ -27,6 +27,14 @@ export default function LiveRun() {
     query: {
       enabled: !!runId,
       queryKey: getGetRunQueryKey(runId),
+      // Polling fallback: while a run is still pending/running, poll every 2s
+      // so the UI updates reliably even if SSE drops or misses the `done` event.
+      refetchInterval: (q) => {
+        const r = (q.state.data as { run?: { status?: string } } | undefined)?.run;
+        if (!r) return 2000;
+        return r.status === "running" || r.status === "pending" ? 2000 : false;
+      },
+      refetchOnWindowFocus: true,
     }
   });
 
@@ -42,13 +50,15 @@ export default function LiveRun() {
   });
   allMessages.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
+  // Track terminal status in a ref so we don't re-open SSE every status change.
+  const terminalRef = React.useRef(false);
   useEffect(() => {
     if (!runId) return;
-
-    // Only connect SSE if we know the run is running or pending
     if (run && (run.status === 'succeeded' || run.status === 'failed' || run.status === 'cancelled')) {
+      terminalRef.current = true;
       return;
     }
+    if (terminalRef.current) return;
 
     const eventSource = new EventSource(`/api/runs/${runId}/stream`);
 
@@ -63,7 +73,13 @@ export default function LiveRun() {
           queryClient.invalidateQueries({ queryKey: getGetRunQueryKey(runId) });
           if (parsed.type === 'done') {
             setActiveRegion(undefined);
+            terminalRef.current = true;
             eventSource.close();
+            // Belt-and-suspenders: refetch once more shortly after, in case the
+            // server hadn't fully committed the finalAnswer when `done` fired.
+            setTimeout(() => {
+              queryClient.invalidateQueries({ queryKey: getGetRunQueryKey(runId) });
+            }, 400);
           }
         }
       } catch (e) {
