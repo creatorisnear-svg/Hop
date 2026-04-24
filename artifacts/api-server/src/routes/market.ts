@@ -17,6 +17,7 @@ import {
   evaluatePrediction,
   computeIndicators,
 } from "../lib/market";
+import { runBacktest } from "../lib/marketBacktest";
 
 // Tiny in-memory caches so a 1-second client poll doesn't hammer Yahoo.
 const quoteCache = new Map<string, { ts: number; data: unknown }>();
@@ -724,6 +725,45 @@ router.post("/market/trades/:id/close", async (req, res) => {
 router.delete("/market/trades/:id", async (req, res) => {
   await db.delete(marketUserTradesTable).where(eq(marketUserTradesTable.id, req.params.id));
   res.json({ ok: true });
+});
+
+// ── Predictor Backtest ────────────────────────────────────────────────────────
+// Replays the indicator+scoring pipeline over the last N trading days without
+// calling the LLM (deterministic), then measures the hit-rate per direction and
+// per horizon so the user can validate the signal before trading real money.
+const backtestCache = new Map<string, { ts: number; data: unknown }>();
+const BACKTEST_TTL_MS = 10 * 60_000; // 10 min cache
+
+router.post("/market/watches/:id/backtest", async (req, res) => {
+  const id = req.params.id;
+  const [watch] = await db
+    .select()
+    .from(marketWatchesTable)
+    .where(eq(marketWatchesTable.id, id))
+    .limit(1);
+  if (!watch) return res.status(404).json({ error: "watch not found" });
+
+  const horizonInput = (req.body?.horizon as string | undefined)?.trim() || "1w";
+  const horizon = ["1d", "1w", "1m", "3m"].includes(horizonInput) ? horizonInput : "1w";
+  const lookbackRaw = Number(req.body?.lookback);
+  const lookback = Number.isFinite(lookbackRaw) ? Math.max(10, Math.min(60, Math.floor(lookbackRaw))) : 30;
+
+  const cacheKey = `${watch.symbol}:${horizon}:${lookback}`;
+  const cached = backtestCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < BACKTEST_TTL_MS) {
+    return res.json(cached.data);
+  }
+
+  try {
+    const result = await runBacktest(watch.symbol, horizon, lookback);
+    const payload = { backtest: result };
+    backtestCache.set(cacheKey, { ts: Date.now(), data: payload });
+    res.json(payload);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ err, watchId: id, symbol: watch.symbol }, "backtest failed");
+    res.status(500).json({ error: msg });
+  }
 });
 
 export default router;

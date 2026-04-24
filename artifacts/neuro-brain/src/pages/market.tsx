@@ -32,6 +32,10 @@ import {
   Target,
   Flame,
   Search,
+  FlaskConical,
+  CheckCircle2,
+  XCircle,
+  Clock,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -165,6 +169,46 @@ interface TrackRecord {
   byAction: Record<string, { total: number; correct: number }>;
   live: { onTrack: number; offTrack: number; targetHits: number };
   currentPrice: number | null;
+}
+
+type BacktestDirection = "BULLISH" | "BEARISH" | "NEUTRAL";
+type BacktestOutcome = "CORRECT" | "WRONG" | "SKIP";
+
+interface BacktestBar {
+  date: string;
+  entryPrice: number;
+  exitPrice: number | null;
+  predictedDirection: BacktestDirection;
+  confidence: number;
+  score: number;
+  actualChangePct: number | null;
+  outcome: BacktestOutcome;
+  horizonDays: number;
+}
+
+interface BacktestDirectionStats {
+  total: number;
+  correct: number;
+  hitRate: number | null;
+}
+
+interface BacktestResult {
+  symbol: string;
+  horizon: string;
+  lookback: number;
+  bars: BacktestBar[];
+  summary: {
+    total: number;
+    correct: number;
+    wrong: number;
+    skipped: number;
+    hitRate: number | null;
+    byDirection: Record<BacktestDirection, BacktestDirectionStats>;
+    avgConfidence: number | null;
+    avgWinPct: number | null;
+    avgLossPct: number | null;
+  };
+  fetchedAt: string;
 }
 
 interface Indicators {
@@ -829,6 +873,8 @@ function WatchDetail({ watch }: { watch: Watch }) {
         <TrackRecordCard track={trackRecord} loading={loading} />
         <IndicatorsCard indicators={indicators} loading={loading} />
       </div>
+
+      <BacktestPanel watchId={watch.id} watchSymbol={watch.symbol} defaultHorizon={horizon} />
 
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr] gap-4">
         <EarningsCard earnings={earnings} loading={earningsLoading} onRefresh={loadEarnings} watchMarket={watch.market} />
@@ -2389,6 +2435,262 @@ function MarketChat({ watch }: { watch: Watch }) {
           </Button>
         </div>
       </CardContent>
+    </Card>
+  );
+}
+
+// ── BacktestPanel ─────────────────────────────────────────────────────────────
+// Runs the indicator + deterministic-scoring pipeline over the last N trading
+// days and shows how often it would have called the right direction per horizon,
+// so the user can gut-check the signal before putting real money to work.
+
+function hitRateColor(rate: number | null): string {
+  if (rate == null) return "text-muted-foreground";
+  if (rate >= 0.65) return "text-emerald-500";
+  if (rate >= 0.5) return "text-yellow-500";
+  return "text-red-400";
+}
+
+function outcomeIcon(outcome: BacktestOutcome) {
+  if (outcome === "CORRECT") return <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />;
+  if (outcome === "WRONG") return <XCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />;
+  return <Clock className="w-3.5 h-3.5 text-muted-foreground shrink-0" />;
+}
+
+function directionBadgeClass(d: BacktestDirection): string {
+  if (d === "BULLISH") return "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30";
+  if (d === "BEARISH") return "bg-red-500/15 text-red-600 dark:text-red-400 border-red-500/30";
+  return "bg-muted/50 text-muted-foreground border-border/50";
+}
+
+function BacktestPanel({
+  watchId,
+  watchSymbol,
+  defaultHorizon,
+}: {
+  watchId: string;
+  watchSymbol: string;
+  defaultHorizon: string;
+}) {
+  const [horizon, setHorizon] = useState(defaultHorizon);
+  const [result, setResult] = useState<BacktestResult | null>(null);
+  const [running, setRunning] = useState(false);
+  const [showBars, setShowBars] = useState(false);
+
+  const run = useCallback(async (h: string) => {
+    setRunning(true);
+    setResult(null);
+    try {
+      const r = await fetch(`/api/market/watches/${watchId}/backtest`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ horizon: h, lookback: 30 }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error ?? "Backtest failed");
+      setResult(data.backtest as BacktestResult);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Backtest failed");
+    } finally {
+      setRunning(false);
+    }
+  }, [watchId]);
+
+  const s = result?.summary;
+
+  return (
+    <Card>
+      <CardHeader className="pb-4">
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+          <div>
+            <CardTitle className="text-base flex items-center gap-2">
+              <FlaskConical className="w-4 h-4 text-primary" /> Predictor Backtest
+            </CardTitle>
+            <CardDescription className="text-xs mt-1">
+              Replays the indicator + scoring pipeline over the last 30 trading days and measures the hit rate — no LLM calls, purely rule-based so results are instant and deterministic.
+            </CardDescription>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <Select value={horizon} onValueChange={(v) => { setHorizon(v); setResult(null); }}>
+              <SelectTrigger className="w-[110px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {HORIZON_OPTIONS.map((h) => (
+                  <SelectItem key={h.value} value={h.value}>{h.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              onClick={() => void run(horizon)}
+              disabled={running}
+              size="sm"
+              className="gap-1.5"
+            >
+              {running ? (
+                <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Running…</>
+              ) : (
+                <><FlaskConical className="w-3.5 h-3.5" /> Run backtest</>
+              )}
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+
+      {result && s && (
+        <CardContent className="space-y-5">
+          {/* Summary stats row */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {/* Overall hit rate */}
+            <div className="rounded-lg border border-border/60 bg-muted/20 p-3 text-center">
+              <div className={`text-2xl font-bold tabular-nums ${hitRateColor(s.hitRate)}`}>
+                {s.hitRate != null ? `${Math.round(s.hitRate * 100)}%` : "—"}
+              </div>
+              <div className="text-[11px] text-muted-foreground mt-1">Overall hit rate</div>
+              <div className="text-[11px] text-muted-foreground">{s.correct}/{s.total} settled</div>
+            </div>
+
+            {/* Per-direction */}
+            {(["BULLISH", "BEARISH", "NEUTRAL"] as BacktestDirection[]).map((d) => {
+              const ds = s.byDirection[d];
+              return (
+                <div key={d} className="rounded-lg border border-border/60 bg-muted/20 p-3 text-center">
+                  <div className={`text-2xl font-bold tabular-nums ${hitRateColor(ds.hitRate)}`}>
+                    {ds.hitRate != null ? `${Math.round(ds.hitRate * 100)}%` : "—"}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground mt-1">{d.charAt(0) + d.slice(1).toLowerCase()} calls</div>
+                  <div className="text-[11px] text-muted-foreground">{ds.correct}/{ds.total} correct</div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Avg win / loss */}
+          <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+            {s.avgWinPct != null && (
+              <span className="inline-flex items-center gap-1">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                Avg win: <span className="font-semibold text-emerald-500">+{s.avgWinPct.toFixed(2)}%</span>
+              </span>
+            )}
+            {s.avgLossPct != null && (
+              <span className="inline-flex items-center gap-1">
+                <XCircle className="w-3.5 h-3.5 text-red-400" />
+                Avg loss: <span className="font-semibold text-red-400">-{s.avgLossPct.toFixed(2)}%</span>
+              </span>
+            )}
+            {s.avgConfidence != null && (
+              <span className="inline-flex items-center gap-1">
+                Avg confidence: <span className="font-semibold">{Math.round(s.avgConfidence * 100)}%</span>
+              </span>
+            )}
+            <span className="inline-flex items-center gap-1">
+              Horizon: <span className="font-semibold">{result.horizon}</span>
+              {" · "}{result.lookback}-day window
+            </span>
+            <span className="text-[11px] opacity-60">
+              {new Date(result.fetchedAt).toLocaleTimeString()}
+            </span>
+          </div>
+
+          {/* Hit-rate bar chart across the 30 bars */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-medium text-muted-foreground">Day-by-day outcomes (oldest → newest)</span>
+              <button
+                className="text-xs text-primary underline-offset-2 hover:underline"
+                onClick={() => setShowBars((v) => !v)}
+              >
+                {showBars ? "Hide detail" : "Show detail"}
+              </button>
+            </div>
+            {/* Mini outcome strip */}
+            <div className="flex flex-wrap gap-1">
+              {result.bars.map((b, i) => (
+                <div
+                  key={i}
+                  title={`${b.date} | ${b.predictedDirection} | ${b.outcome} | ${b.actualChangePct != null ? `${b.actualChangePct >= 0 ? "+" : ""}${b.actualChangePct.toFixed(2)}%` : "pending"}`}
+                  className={`h-5 w-5 rounded-sm border ${
+                    b.outcome === "CORRECT"
+                      ? "bg-emerald-500/70 border-emerald-500"
+                      : b.outcome === "WRONG"
+                        ? "bg-red-400/70 border-red-400"
+                        : "bg-muted/40 border-border/40"
+                  }`}
+                />
+              ))}
+            </div>
+            <div className="flex gap-3 mt-1.5 text-[10px] text-muted-foreground">
+              <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-emerald-500/70 inline-block" /> Correct</span>
+              <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-400/70 inline-block" /> Wrong</span>
+              <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-muted/40 inline-block" /> Pending</span>
+            </div>
+          </div>
+
+          {/* Detailed table */}
+          {showBars && (
+            <div className="overflow-x-auto rounded-lg border border-border/60">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-border/60 bg-muted/30">
+                    <th className="text-left px-3 py-2 font-medium text-muted-foreground">Date</th>
+                    <th className="text-left px-3 py-2 font-medium text-muted-foreground">Entry</th>
+                    <th className="text-left px-3 py-2 font-medium text-muted-foreground">Exit</th>
+                    <th className="text-left px-3 py-2 font-medium text-muted-foreground">Signal</th>
+                    <th className="text-left px-3 py-2 font-medium text-muted-foreground">Score</th>
+                    <th className="text-left px-3 py-2 font-medium text-muted-foreground">Actual %</th>
+                    <th className="text-left px-3 py-2 font-medium text-muted-foreground">Result</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.bars.map((b, i) => (
+                    <tr key={i} className={`border-b border-border/40 last:border-0 ${i % 2 === 0 ? "" : "bg-muted/10"}`}>
+                      <td className="px-3 py-2 font-mono text-muted-foreground">{b.date}</td>
+                      <td className="px-3 py-2 font-mono">${b.entryPrice.toFixed(2)}</td>
+                      <td className="px-3 py-2 font-mono text-muted-foreground">{b.exitPrice != null ? `$${b.exitPrice.toFixed(2)}` : "—"}</td>
+                      <td className="px-3 py-2">
+                        <span className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] font-medium ${directionBadgeClass(b.predictedDirection)}`}>
+                          {b.predictedDirection === "BULLISH" ? "▲" : b.predictedDirection === "BEARISH" ? "▼" : "—"} {b.predictedDirection.charAt(0) + b.predictedDirection.slice(1).toLowerCase()}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 font-mono text-center">
+                        <span className={b.score >= 2 ? "text-emerald-500" : b.score <= -2 ? "text-red-400" : "text-muted-foreground"}>
+                          {b.score >= 0 ? "+" : ""}{b.score.toFixed(1)}
+                        </span>
+                      </td>
+                      <td className={`px-3 py-2 font-mono ${b.actualChangePct == null ? "text-muted-foreground" : b.actualChangePct >= 0 ? "text-emerald-500" : "text-red-400"}`}>
+                        {b.actualChangePct != null ? `${b.actualChangePct >= 0 ? "+" : ""}${b.actualChangePct.toFixed(2)}%` : "—"}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className="flex items-center gap-1">
+                          {outcomeIcon(b.outcome)}
+                          <span className={b.outcome === "CORRECT" ? "text-emerald-500" : b.outcome === "WRONG" ? "text-red-400" : "text-muted-foreground"}>
+                            {b.outcome}
+                          </span>
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      )}
+
+      {!result && !running && (
+        <CardContent>
+          <div className="text-sm text-muted-foreground italic py-4 text-center">
+            Click "Run backtest" to replay {watchSymbol}'s last 30 trading days through the indicator pipeline and see projected hit rates.
+          </div>
+        </CardContent>
+      )}
+
+      {running && (
+        <CardContent>
+          <div className="flex items-center justify-center gap-2 py-6 text-sm text-muted-foreground">
+            <Loader2 className="w-4 h-4 animate-spin" /> Fetching 2 years of bars and replaying the pipeline…
+          </div>
+        </CardContent>
+      )}
     </Card>
   );
 }
