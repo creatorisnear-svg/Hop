@@ -1116,30 +1116,61 @@ function LivePriceChart({
 
   // One unified scale shared by history AND forecast. Prediction line lives
   // inside the same chart, on the same axes — no split, no separate panel.
+  // Zoom / pan state — when null, the chart auto-fits to the full data range
+  // (default behavior). When set, [t0, t1] defines the visible time window
+  // and the chart switches to a single linear x-axis spanning that window.
+  const [zoomWindow, setZoomWindow] = useState<{ t0: number; t1: number } | null>(null);
+  // Active drag-pan session — set on pointerdown, cleared on pointerup. Held in
+  // a ref (not state) because every pointermove event would otherwise re-render.
+  const panRef = useRef<{
+    pointerId: number;
+    startClientX: number;
+    startT0: number;
+    startT1: number;
+    width: number;
+  } | null>(null);
+  // Reset zoom when the user changes the range selector (1D / 5D / 1M / etc.)
+  // — otherwise a zoom from the 5D view would carry over awkwardly into 1M.
+  useEffect(() => { setZoomWindow(null); }, [rangeKey]);
+
   const view = useMemo(() => {
     if (histCandles.length === 0 || !livePivot) return null;
     const tMin = histCandles[0].t;
     const histTMax = histCandles[histCandles.length - 1].t;
     const fcastEnd = dims.hasForecast ? livePivot.t + projectionMs : histTMax;
     const tMax = Math.max(histTMax, fcastEnd);
+    const isZoomed = zoomWindow !== null;
+    const effT0 = zoomWindow?.t0 ?? tMin;
+    const effT1 = zoomWindow?.t1 ?? tMax;
 
     let pMin = Number.POSITIVE_INFINITY;
     let pMax = Number.NEGATIVE_INFINITY;
     for (const c of histCandles) {
+      // When zoomed, only fit y-axis to candles in the visible window so the
+      // y-axis "rescales" as the user zooms in on different price regions.
+      if (isZoomed && (c.t < effT0 || c.t > effT1)) continue;
       if (c.l < pMin) pMin = c.l;
       if (c.h > pMax) pMax = c.h;
+    }
+    if (!Number.isFinite(pMin) || !Number.isFinite(pMax)) {
+      // Fallback in case zoom window contains no candles
+      for (const c of histCandles) {
+        if (c.l < pMin) pMin = c.l;
+        if (c.h > pMax) pMax = c.h;
+      }
     }
     if (rangeKey === "1D" && series?.previousClose) {
       pMin = Math.min(pMin, series.previousClose);
       pMax = Math.max(pMax, series.previousClose);
     }
-    if (livePrice != null) {
+    if (livePrice != null && !isZoomed) {
       pMin = Math.min(pMin, livePrice);
       pMax = Math.max(pMax, livePrice);
     }
     // Pull the forecast target into the y-range so the projected line is in
-    // bounds (if we have one).
-    if (dims.hasForecast && prediction?.targetPrice != null) {
+    // bounds (if we have one) — but only in default (un-zoomed) view, since
+    // a deep zoom into the past shouldn't be stretched to fit a far-away target.
+    if (!isZoomed && dims.hasForecast && prediction?.targetPrice != null) {
       pMin = Math.min(pMin, prediction.targetPrice);
       pMax = Math.max(pMax, prediction.targetPrice);
     }
@@ -1153,7 +1184,8 @@ function LivePriceChart({
     const y1 = dims.h - dims.padB;
     // Reserve roughly 30% of the chart's x-axis for the forecast tail so the
     // projection has room to breathe instead of being squeezed at the edge.
-    const fcastFrac = dims.hasForecast ? (isNarrow ? 0.32 : 0.3) : 0;
+    // When zoomed, switch to a single linear x-axis (no forecast reservation).
+    const fcastFrac = !isZoomed && dims.hasForecast ? (isNarrow ? 0.32 : 0.3) : 0;
     const histFrac = 1 - fcastFrac;
     const histPxStart = x0;
     const histPxEnd = x0 + (x1 - x0) * histFrac;
@@ -1169,9 +1201,32 @@ function LivePriceChart({
       const span = Math.max(fEnd - fStart, 1);
       return histPxEnd + Math.min(1, Math.max(0, (t - fStart) / span)) * (fcastPxEnd - histPxEnd);
     };
-    const xOf = (t: number) => (t <= histTMax ? xOfHist(t) : xOfForecast(t));
+    const xOfLinear = (t: number) => {
+      const span = Math.max(effT1 - effT0, 1);
+      return x0 + ((t - effT0) / span) * (x1 - x0);
+    };
+    const xOf = isZoomed ? xOfLinear : (t: number) => (t <= histTMax ? xOfHist(t) : xOfForecast(t));
+    // Inverse: pixel-x in the SVG coordinate space → time. Only used by the
+    // pointer/wheel handlers below to anchor zoom and pan around the cursor.
+    const tOfX = (x: number) => {
+      if (isZoomed) {
+        const span = Math.max(effT1 - effT0, 1);
+        return effT0 + ((x - x0) / Math.max(x1 - x0, 1)) * span;
+      }
+      if (x <= histPxEnd) {
+        const span = Math.max(histTMax - tMin, 1);
+        return tMin + ((x - histPxStart) / Math.max(histPxEnd - histPxStart, 1)) * span;
+      }
+      const span = Math.max(fcastEnd - livePivot.t, 1);
+      return livePivot.t + ((x - histPxEnd) / Math.max(fcastPxEnd - histPxEnd, 1)) * span;
+    };
     const yOf = (c: number) => y0 + (1 - (c - pMin) / Math.max(pMax - pMin, 1e-9)) * (y1 - y0);
-    const slot = (histPxEnd - histPxStart) / Math.max(histCandles.length, 1);
+    const visibleHist = isZoomed
+      ? histCandles.filter((c) => c.t >= effT0 && c.t <= effT1)
+      : histCandles;
+    const slot = isZoomed
+      ? (x1 - x0) / Math.max(visibleHist.length, 1)
+      : (histPxEnd - histPxStart) / Math.max(histCandles.length, 1);
     const bodyW = Math.max(1, Math.min(14, slot * 0.7));
     const lastCandle = histCandles[histCandles.length - 1];
 
@@ -1181,12 +1236,13 @@ function LivePriceChart({
       : "#fbbf24";
 
     return {
-      xOf, yOf, pMin, pMax, tMin, tMax,
+      xOf, yOf, tOfX, pMin, pMax, tMin, tMax, fullTMin: tMin, fullTMax: tMax,
+      effT0, effT1, isZoomed,
       histTMax, histPxStart, histPxEnd, fcastPxEnd,
       x0, x1, y0, y1, slot, bodyW, lastCandle,
       fcastColor, fcastEnd,
     };
-  }, [histCandles, rangeKey, series, dims, livePrice, livePivot, prediction, projectionMs, isNarrow]);
+  }, [histCandles, rangeKey, series, dims, livePrice, livePivot, prediction, projectionMs, isNarrow, zoomWindow]);
 
   // The live projected line: anchored at the *current* live price, sloping to
   // the prediction's target. Re-evaluated every second via `nowMs` so the
@@ -1210,11 +1266,24 @@ function LivePriceChart({
   }, [view, dims.hasForecast, livePivot, prediction, nowMs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fmtPrice = (v: number) => v.toLocaleString(undefined, { maximumFractionDigits: v >= 100 ? 2 : 4 });
+  // Mountain Standard Arizona Time. Arizona doesn't observe daylight saving,
+  // so it stays on MST year-round (UTC-7). All chart timestamps are formatted
+  // in this zone so the axis lines up with the user's local clock.
+  const AZ_TZ = "America/Phoenix";
   const fmtTime = (ts: number) => {
     const d = new Date(ts);
-    if (rangeKey === "1D") return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    if (rangeKey === "5D") return d.toLocaleString([], { weekday: "short", hour: "2-digit" });
-    return d.toLocaleDateString([], { month: "short", day: "numeric" });
+    // When zoomed in tightly, show finer granularity even on day-level ranges.
+    const span = view ? view.effT1 - view.effT0 : Number.POSITIVE_INFINITY;
+    const HOUR = 60 * 60 * 1000;
+    if (span <= 6 * HOUR) {
+      return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: AZ_TZ });
+    }
+    if (span <= 36 * HOUR) {
+      return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: AZ_TZ });
+    }
+    if (rangeKey === "1D") return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: AZ_TZ });
+    if (rangeKey === "5D") return d.toLocaleString("en-US", { weekday: "short", hour: "2-digit", timeZone: AZ_TZ });
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: AZ_TZ });
   };
   const currency = series?.currency ?? prediction?.quote?.currency ?? "";
   const change = livePrice != null && series?.previousClose
@@ -1246,7 +1315,7 @@ function LivePriceChart({
             </div>
             <div className={`text-[11px] sm:text-xs ${changeTone}`}>
               {change != null ? `${change >= 0 ? "+" : ""}${change.toFixed(2)}% today` : ""}
-              {tickAt ? <span className="ml-2 text-muted-foreground hidden sm:inline">· {new Date(tickAt).toLocaleTimeString()}</span> : null}
+              {tickAt ? <span className="ml-2 text-muted-foreground hidden sm:inline">· {new Date(tickAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "America/Phoenix" }) + " MST"}</span> : null}
             </div>
           </div>
         </div>
@@ -1263,7 +1332,50 @@ function LivePriceChart({
         </div>
       </CardHeader>
       <CardContent className="p-0 sm:p-6">
-        <div ref={containerRef} className="w-full overflow-hidden" style={{ height: dims.h || 320 }}>
+        <div ref={containerRef} className="w-full overflow-hidden relative" style={{ height: dims.h || 320 }}>
+        {/* Floating zoom controls — overlay top-right of the chart. Visible
+            on every device so mobile users (who can't mouse-wheel) can zoom too. */}
+        {view && containerW > 0 && (
+          <div className="absolute top-2 right-2 z-10 flex items-center gap-1 bg-background/85 backdrop-blur-sm rounded-md border border-border/60 p-0.5 shadow-sm">
+            <button
+              type="button"
+              aria-label="Zoom out"
+              onClick={() => {
+                const cur = view.isZoomed ? { t0: view.effT0, t1: view.effT1 } : { t0: view.fullTMin, t1: view.fullTMax };
+                const span = (cur.t1 - cur.t0) * 1.5;
+                const max = view.fullTMax - view.fullTMin;
+                if (span >= max * 0.98) { setZoomWindow(null); return; }
+                const center = (cur.t0 + cur.t1) / 2;
+                let t0 = center - span / 2;
+                let t1 = center + span / 2;
+                if (t0 < view.fullTMin) { t1 += view.fullTMin - t0; t0 = view.fullTMin; }
+                if (t1 > view.fullTMax) { t0 -= t1 - view.fullTMax; t1 = view.fullTMax; }
+                setZoomWindow({ t0, t1 });
+              }}
+              className="h-7 w-7 flex items-center justify-center rounded text-xs font-bold hover:bg-muted text-foreground/80"
+            >−</button>
+            <button
+              type="button"
+              aria-label="Zoom in"
+              onClick={() => {
+                const cur = view.isZoomed ? { t0: view.effT0, t1: view.effT1 } : { t0: view.fullTMin, t1: view.fullTMax };
+                const span = (cur.t1 - cur.t0) / 1.5;
+                if (span < 60_000) return;
+                const center = (cur.t0 + cur.t1) / 2;
+                setZoomWindow({ t0: center - span / 2, t1: center + span / 2 });
+              }}
+              className="h-7 w-7 flex items-center justify-center rounded text-xs font-bold hover:bg-muted text-foreground/80"
+            >+</button>
+            {view.isZoomed && (
+              <button
+                type="button"
+                aria-label="Reset zoom"
+                onClick={() => setZoomWindow(null)}
+                className="h-7 px-2 flex items-center justify-center rounded text-[10px] font-semibold uppercase tracking-wide hover:bg-muted text-foreground/80"
+              >Reset</button>
+            )}
+          </div>
+        )}
         {!view || containerW === 0 ? (
           <div className="w-full h-full flex items-center justify-center text-sm text-muted-foreground">
             Loading market data…
@@ -1274,7 +1386,70 @@ function LivePriceChart({
             width="100%"
             height={dims.h}
             preserveAspectRatio="xMidYMid meet"
-            className="block"
+            className="block touch-none select-none"
+            style={{ cursor: view.isZoomed ? "grab" : "default" }}
+            onWheel={(e) => {
+              if (!view) return;
+              e.preventDefault();
+              const svgEl = e.currentTarget;
+              const rect = svgEl.getBoundingClientRect();
+              const cssX = e.clientX - rect.left;
+              const svgX = (cssX / rect.width) * dims.w;
+              const anchor = view.tOfX(svgX);
+              const cur = view.isZoomed ? { t0: view.effT0, t1: view.effT1 } : { t0: view.fullTMin, t1: view.fullTMax };
+              const factor = e.deltaY > 0 ? 1.2 : 1 / 1.2;
+              const newSpan = (cur.t1 - cur.t0) * factor;
+              const fullSpan = view.fullTMax - view.fullTMin;
+              if (newSpan >= fullSpan * 0.98) { setZoomWindow(null); return; }
+              if (newSpan < 60_000) return;
+              const ratio = (anchor - cur.t0) / Math.max(cur.t1 - cur.t0, 1);
+              let t0 = anchor - ratio * newSpan;
+              let t1 = t0 + newSpan;
+              if (t0 < view.fullTMin) { t1 += view.fullTMin - t0; t0 = view.fullTMin; }
+              if (t1 > view.fullTMax) { t0 -= t1 - view.fullTMax; t1 = view.fullTMax; }
+              setZoomWindow({ t0, t1 });
+            }}
+            onPointerDown={(e) => {
+              if (!view) return;
+              // Only start panning when zoomed — un-zoomed chart drag would
+              // feel unresponsive (no visible movement).
+              if (!view.isZoomed) return;
+              e.currentTarget.setPointerCapture(e.pointerId);
+              panRef.current = {
+                pointerId: e.pointerId,
+                startClientX: e.clientX,
+                startT0: view.effT0,
+                startT1: view.effT1,
+                width: e.currentTarget.getBoundingClientRect().width,
+              };
+              e.currentTarget.style.cursor = "grabbing";
+            }}
+            onPointerMove={(e) => {
+              const p = panRef.current;
+              if (!p || p.pointerId !== e.pointerId || !view) return;
+              const dxCss = e.clientX - p.startClientX;
+              const dxSvg = (dxCss / Math.max(p.width, 1)) * dims.w;
+              const plotW = Math.max(view.x1 - view.x0, 1);
+              const span = p.startT1 - p.startT0;
+              const dt = -(dxSvg / plotW) * span;
+              let t0 = p.startT0 + dt;
+              let t1 = p.startT1 + dt;
+              if (t0 < view.fullTMin) { t1 += view.fullTMin - t0; t0 = view.fullTMin; }
+              if (t1 > view.fullTMax) { t0 -= t1 - view.fullTMax; t1 = view.fullTMax; }
+              setZoomWindow({ t0, t1 });
+            }}
+            onPointerUp={(e) => {
+              if (panRef.current?.pointerId === e.pointerId) {
+                panRef.current = null;
+                e.currentTarget.style.cursor = view?.isZoomed ? "grab" : "default";
+              }
+            }}
+            onPointerCancel={(e) => {
+              if (panRef.current?.pointerId === e.pointerId) {
+                panRef.current = null;
+                e.currentTarget.style.cursor = view?.isZoomed ? "grab" : "default";
+              }
+            }}
           >
             {/* horizontal grid (full width including forecast zone) */}
             {[0.2, 0.4, 0.6, 0.8].map((f) => {
@@ -1289,10 +1464,15 @@ function LivePriceChart({
               return <text key={`hy${f}`} x={view.x0 - 4} y={y + 3} textAnchor="end" fontSize={isNarrow ? "9" : "10"}
                 fill="hsl(var(--muted-foreground))" fontFamily="monospace">{fmtPrice(v)}</text>;
             })}
-            {/* x labels for the history portion */}
-            {[0, 0.5, 1].map((f) => {
-              const x = view.histPxStart + f * (view.histPxEnd - view.histPxStart);
-              const t = view.tMin + f * (view.histTMax - view.tMin);
+            {/* x labels — span the visible window. When zoomed, this rescales
+                to show the time range the user has zoomed into. */}
+            {(view.isZoomed ? [0, 0.25, 0.5, 0.75, 1] : [0, 0.5, 1]).map((f) => {
+              const x = view.isZoomed
+                ? view.x0 + f * (view.x1 - view.x0)
+                : view.histPxStart + f * (view.histPxEnd - view.histPxStart);
+              const t = view.isZoomed
+                ? view.effT0 + f * (view.effT1 - view.effT0)
+                : view.tMin + f * (view.histTMax - view.tMin);
               return <text key={`hx${f}`} x={x} y={dims.h - 6} textAnchor={f === 0 ? "start" : f === 1 ? "end" : "middle"}
                 fontSize={isNarrow ? "8" : "10"} fill="hsl(var(--muted-foreground))" fontFamily="monospace">{fmtTime(t)}</text>;
             })}
@@ -1310,9 +1490,12 @@ function LivePriceChart({
                   textAnchor="end" fontSize="9" fill="hsl(var(--muted-foreground))">prev close</text>
               </>
             )}
-            {/* OHLC candles — wick = high/low, body = open/close */}
+            {/* OHLC candles — wick = high/low, body = open/close.
+                When zoomed, candles outside the visible window are skipped so
+                they don't bleed over the y-axis labels on the left margin. */}
             {histCandles.map((c, i) => {
               const x = view.xOf(c.t);
+              if (x < view.x0 - 8 || x > view.x1 + 8) return null;
               const yH = view.yOf(c.h);
               const yL = view.yOf(c.l);
               const yO = view.yOf(c.o);
@@ -1545,7 +1728,7 @@ function LivePriceChart({
               </span>
             </span>
             <span>·</span>
-            <span>Updates every second · last call {new Date(prediction.createdAt).toLocaleTimeString()}</span>
+            <span>Updates every second · last call {new Date(prediction.createdAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "America/Phoenix" }) + " MST"}</span>
           </div>
         )}
       </CardContent>
@@ -1869,7 +2052,7 @@ function OpenTradesPanel({
                     </Badge>
                   )}
                   <span className="text-xs text-muted-foreground ml-auto">
-                    Opened {new Date(t.openedAt).toLocaleString()}
+                    Opened {new Date(t.openedAt).toLocaleString("en-US", { dateStyle: "short", timeStyle: "short", timeZone: "America/Phoenix" }) + " MST"}
                   </span>
                 </div>
                 <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
@@ -1940,7 +2123,7 @@ function OpenTradesPanel({
                       : `${t.pnlPct >= 0 ? "+" : ""}${fmt(t.pnlPct)}%`}
                   </span>
                   <span className="text-muted-foreground ml-auto">
-                    {t.closedAt && new Date(t.closedAt).toLocaleString()}
+                    {t.closedAt && new Date(t.closedAt).toLocaleString("en-US", { dateStyle: "short", timeStyle: "short", timeZone: "America/Phoenix" }) + " MST"}
                   </span>
                   <Button size="sm" variant="ghost" onClick={() => void onDelete(t.id)} className="h-6 w-6 p-0">
                     <Trash2 className="w-3 h-3" />
@@ -2001,7 +2184,7 @@ function PredictionCard({
             </Badge>
           )}
           <span className="text-xs text-muted-foreground ml-auto">
-            {new Date(prediction.createdAt).toLocaleString()}
+            {new Date(prediction.createdAt).toLocaleString("en-US", { dateStyle: "short", timeStyle: "short", timeZone: "America/Phoenix" }) + " MST"}
           </span>
         </div>
 
@@ -2579,7 +2762,7 @@ function BacktestPanel({
             <div className="flex items-center gap-3">
               {signalBadge(s.signalQuality as SignalQuality)}
               <span className="text-xs text-muted-foreground">
-                {result.horizon} horizon · {result.lookback}-day window · {new Date(result.fetchedAt).toLocaleTimeString()}
+                {result.horizon} horizon · {result.lookback}-day window · {new Date(result.fetchedAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "America/Phoenix" }) + " MST"}
               </span>
             </div>
             {s.expectedValue != null && (
