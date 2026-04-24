@@ -1372,15 +1372,58 @@ function LivePriceChart({
   // volatility. Same prediction → same path, so it doesn't reshuffle on every
   // re-render. We also build a confidence cone (bull/bear envelope) so the
   // user can see the *range* of plausible outcomes, not just the median path.
+  // ── STABLE WAVE SHAPE ──────────────────────────────────────────────────
+  // Generate the normalized random-walk shape ONCE per prediction. Previously
+  // this was reseeded every live tick (because `livePivot.t` was in the seed),
+  // which produced a brand-new wiggle pattern every second — visible as the
+  // chart's projection line "glitching" between frames. Now the shape only
+  // changes when the prediction itself changes; live ticks just slide the
+  // anchor points underneath a stable shape.
+  const STEPS = 48;
+  const wiggleShape = useMemo(() => {
+    if (!prediction?.id) return null;
+    const seedKey = `${prediction.id}|${prediction.targetPrice ?? "x"}|${prediction.direction ?? ""}|${horizon}`;
+    let seed = 2166136261 >>> 0;
+    for (let i = 0; i < seedKey.length; i++) {
+      seed = (seed ^ seedKey.charCodeAt(i)) >>> 0;
+      seed = Math.imul(seed, 16777619) >>> 0;
+    }
+    const rand = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 0xFFFFFFFF;
+    };
+    // Smoothed brownian-ish walk, then detrended so it pins to the endpoints.
+    const raw: number[] = [0];
+    for (let i = 1; i <= STEPS; i++) {
+      raw.push(raw[i - 1] * 0.78 + (rand() - 0.5) * 2);
+    }
+    const lastRaw = raw[STEPS] || 1;
+    const norm: number[] = [];           // normalized wiggle offset per step
+    const env: number[] = [];            // sin envelope (0 at endpoints, 1 mid)
+    const cone: number[] = [];           // confidence band half-width fraction
+    for (let i = 0; i <= STEPS; i++) {
+      const f = i / STEPS;
+      norm.push(raw[i] - lastRaw * f);   // detrended walk
+      env.push(Math.sin(Math.PI * f));   // envelope keeps endpoints clean
+      cone.push(Math.sqrt(f) * 1.4);     // widens with sqrt(time)
+    }
+    return { norm, env, cone };
+  }, [prediction?.id, prediction?.targetPrice, prediction?.direction, horizon]);
+
+  // ── LIVE-ANCHORED PROJECTION ──────────────────────────────────────────
+  // Maps the stable shape onto the chart using the *current* live price as
+  // the start anchor and the prediction target as the end anchor. Re-runs on
+  // every tick so the head of the line tracks the live price, but the wave
+  // pattern itself stays put.
   const liveProjection = useMemo(() => {
-    if (!view || !dims.hasForecast || !livePivot || prediction?.targetPrice == null) return null;
+    if (!view || !dims.hasForecast || !livePivot || prediction?.targetPrice == null || !wiggleShape) return null;
     const startT = livePivot.t;
     const startC = livePivot.c;
     const endT = view.fcastEnd;
     const endC = prediction.targetPrice;
 
-    // Recent volatility from the historical candles — used to scale the wiggle
-    // so blue-chip names get a calm path and meme stocks get a jagged one.
+    // Recent realised vol — used to scale the wiggle amplitude so blue-chips
+    // get a calm path and meme stocks get a jagged one.
     let vol = 0;
     const tail = histCandles.slice(-30);
     if (tail.length >= 2) {
@@ -1392,8 +1435,6 @@ function LivePriceChart({
       if (n > 0) vol = sumAbs / n;
     }
     const totalChange = endC - startC;
-    // Amplitude blends predicted-move size with realised volatility. Bounded
-    // so a tiny prediction doesn't disappear and a huge one doesn't go wild.
     const amp = Math.max(
       startC * 0.0015,
       Math.min(
@@ -1402,70 +1443,31 @@ function LivePriceChart({
       ),
     );
 
-    // Seeded RNG so the same prediction always renders the same path. Seed
-    // off the prediction id + target so a fresh prediction draws a fresh path.
-    const seedKey = `${prediction?.id ?? "p"}|${prediction?.targetPrice}|${prediction?.direction ?? ""}|${startT}`;
-    let seed = 2166136261 >>> 0;
-    for (let i = 0; i < seedKey.length; i++) {
-      seed = (seed ^ seedKey.charCodeAt(i)) >>> 0;
-      seed = Math.imul(seed, 16777619) >>> 0;
-    }
-    const rand = () => {
-      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-      return seed / 0xFFFFFFFF;
-    };
-
-    const STEPS = 48;
-    const pts: { t: number; c: number; up: number; down: number }[] = [];
-    // Build the wiggle as a smoothed brownian-ish walk, then *force* it to
-    // land on the target by interpolating out the residual error linearly.
-    const raw: number[] = [0];
-    for (let i = 1; i <= STEPS; i++) {
-      const step = (rand() - 0.5) * 2;          // -1..+1
-      const prev = raw[i - 1];
-      raw.push(prev * 0.78 + step);             // mild momentum, no runaway drift
-    }
-    const lastRaw = raw[STEPS] || 1;
-    for (let i = 0; i <= STEPS; i++) {
-      const f = i / STEPS;
-      const t = startT + (endT - startT) * f;
-      // Linear baseline from current price → target
-      const base = startC + totalChange * f;
-      // Subtract the linear drift in the raw walk so the path lands on target
-      const detrended = raw[i] - lastRaw * f;
-      // Envelope: 0 at both endpoints (path is pinned), peaks in the middle
-      const env = Math.sin(Math.PI * f);
-      const wiggle = detrended * amp * env * 0.55;
-      const c = base + wiggle;
-      // Confidence cone bounds — widen with sqrt(time) like a real forecast
-      const cone = amp * Math.sqrt(f) * 1.4;
-      pts.push({ t, c, up: base + cone, down: base - cone });
-    }
-
-    // SVG path strings for the median path and the confidence band.
     let median = "";
     let upper = "";
     let lower = "";
+    let coneStr = "";
+    const lastIdx = STEPS;
     for (let i = 0; i <= STEPS; i++) {
-      const p = pts[i];
-      const x = view.xOf(p.t);
-      median += `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${view.yOf(p.c).toFixed(1)} `;
-      upper  += `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${view.yOf(p.up).toFixed(1)} `;
-      lower  += `${i === 0 ? "L" : "L"}${x.toFixed(1)} ${view.yOf(p.down).toFixed(1)} `;
+      const f = i / STEPS;
+      const t = startT + (endT - startT) * f;
+      const base = startC + totalChange * f;
+      const c = base + wiggleShape.norm[i] * amp * wiggleShape.env[i] * 0.55;
+      const upY = base + amp * wiggleShape.cone[i];
+      const dnY = base - amp * wiggleShape.cone[i];
+      const x = view.xOf(t);
+      median += `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${view.yOf(c).toFixed(1)} `;
+      upper  += `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${view.yOf(upY).toFixed(1)} `;
+      lower  += `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${view.yOf(dnY).toFixed(1)} `;
+      coneStr += `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${view.yOf(upY).toFixed(1)} `;
     }
-    // Reverse the lower curve onto the upper to make a closed band polygon.
-    const conePath = (() => {
-      let s = "";
-      for (let i = 0; i <= STEPS; i++) {
-        const p = pts[i];
-        s += `${i === 0 ? "M" : "L"}${view.xOf(p.t).toFixed(1)} ${view.yOf(p.up).toFixed(1)} `;
-      }
-      for (let i = STEPS; i >= 0; i--) {
-        const p = pts[i];
-        s += `L${view.xOf(p.t).toFixed(1)} ${view.yOf(p.down).toFixed(1)} `;
-      }
-      return s + "Z";
-    })();
+    for (let i = lastIdx; i >= 0; i--) {
+      const f = i / STEPS;
+      const t = startT + (endT - startT) * f;
+      const base = startC + totalChange * f;
+      const dnY = base - amp * wiggleShape.cone[i];
+      coneStr += `L${view.xOf(t).toFixed(1)} ${view.yOf(dnY).toFixed(1)} `;
+    }
 
     return {
       x1: view.xOf(startT),
@@ -1474,13 +1476,13 @@ function LivePriceChart({
       y2: view.yOf(endC),
       startC,
       endC,
-      changePct: ((endC - startC) / startC) * 100,
+      changePct: startC > 0 ? ((endC - startC) / startC) * 100 : 0,
       pathD: median.trim(),
       upperD: upper.trim(),
       lowerD: lower.trim(),
-      coneD: conePath.trim(),
+      coneD: (coneStr + "Z").trim(),
     };
-  }, [view, dims.hasForecast, livePivot, prediction, histCandles, nowMs]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [view, dims.hasForecast, livePivot, prediction, histCandles, wiggleShape, nowMs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fmtPrice = (v: number) => v.toLocaleString(undefined, { maximumFractionDigits: v >= 100 ? 2 : 4 });
   // Mountain Standard Arizona Time. Arizona doesn't observe daylight saving,

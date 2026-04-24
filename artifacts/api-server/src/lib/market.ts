@@ -930,15 +930,22 @@ A. SCORE each input on a -2..+2 scale and tally:
 B. Pick direction from the SUM (positive → BULLISH, negative → BEARISH, |sum|≤1 → NEUTRAL).
 C. Confidence = clamp(0.4 + 0.1*|sum| + 0.05*(news_signal_strength), 0, 0.95).
    Lower confidence whenever signals contradict each other.
-D. Compute targetPrice with this formula, NOT a guess:
-     expected_pct ≈ direction_sign * confidence * min(MAX_PCT, k * volatility20d * sqrt(horizon_days/20))
-   where k = 1.0 for stocks/ETFs, 1.5 for crypto/forex/index, horizon_days as listed below,
-   then round to a clean number near the live quote.
-   Horizon → days: "1h"=0.05, "4h"=0.17, "1d"=1, "1w"=5, "2w"=10, "1m"=21, "3m"=63.
-   Horizon → MAX_PCT cap (HARD CEILING): "1h"=1.5, "4h"=2.5, "1d"=4, "1w"=8, "2w"=12, "1m"=18, "3m"=25.
-   A 20% intraday move is an outlier event — do NOT predict that for any intraday horizon
-   no matter how confident you feel. These caps calibrate targets to the actual
-   statistical distribution of moves at each horizon.
+D. Compute targetPrice with this STANDARD √t volatility-scaling formula, NOT a guess:
+     expected_pct ≈ direction_sign * (0.6 + 0.5*confidence) * min(MAX_PCT, k * volatility20d * sqrt(horizon_days))
+   where:
+     • volatility20d is the realised DAILY volatility (typical equity ≈ 1.5%, crypto ≈ 4%).
+     • k = 1.0 for stocks/ETFs, 1.5 for crypto/forex/index/leveraged ETFs.
+     • horizon_days are TRADING-DAY fractions (6.5h equity session): "1h"=0.15, "4h"=0.6, "1d"=1, "1w"=5, "2w"=10, "1m"=21, "3m"=63.
+     • The (0.6 + 0.5*confidence) factor scales target between ~60% and ~110% of one expected-move sigma — usable for puts/calls scalping, not a passive long-only forecast.
+   Then round to a clean tradeable tick near the live quote.
+   Horizon → MAX_PCT HARD CAP (3-σ tail event, almost never to be exceeded):
+     "1h"=1.5, "4h"=3.0, "1d"=5, "1w"=10, "2w"=14, "1m"=20, "3m"=30.
+   IMPORTANT: this is a DAY-TRADING tool. For "1h" with vol=1.5% and confidence=0.7:
+     1.0 * 0.015 * sqrt(0.15) * (0.6 + 0.5*0.7) ≈ 0.5% → that's a real scalpable move.
+   A target smaller than 0.20% on any horizon is useless for puts/calls (premium decay
+   will eat the trade). If your computed move is < 0.20%, you may either floor it to 0.20%
+   OR drop confidence below 0.55 so action becomes HOLD. Never emit a near-zero target with
+   high confidence — that's worse than no signal at all.
 
 CONTEXT — THIS IS A DAY-TRADING PUTS-AND-CALLS ASSISTANT:
 The user is overwhelmingly trading short-dated options (0DTE / weeklies). When the
@@ -1296,29 +1303,54 @@ Rules:
     // almost certainly a model hallucination, so we trim it back instead of
     // letting it distort the forecast chart and the option-trade signal.
     const HORIZON_TARGET_CAP: Record<string, number> = {
-      "1h":  0.015,  // ±1.5% in 1 hour (a strong scalp)
-      "4h":  0.025,  // ±2.5% in 4 hours (a notable intraday move)
-      "1d":  0.04,   // ±4% intraday  (≈ 2-3σ on a 1.5% daily-vol stock)
-      "1w":  0.08,   // ±8% in a week
-      "2w":  0.12,   // ±12% in two weeks
-      "1m":  0.18,   // ±18% in a month
-      "3m":  0.25,   // ±25% in three months
+      "1h":  0.015,  // ±1.5%  in 1 hour (a strong scalp, ≈ 3σ at 1.5% daily vol)
+      "4h":  0.030,  // ±3.0%  in 4 hours
+      "1d":  0.050,  // ±5.0%  in a day
+      "1w":  0.10,   // ±10%   in a week
+      "2w":  0.14,   // ±14%   in two weeks
+      "1m":  0.20,   // ±20%   in a month
+      "3m":  0.30,   // ±30%   in three months
+    };
+    // Same horizons need a FLOOR for the day-trading use case. A 0.05% target
+    // is technically inside the cap but utterly useless for puts/calls — the
+    // bid/ask spread alone eats more than that. We bump tiny targets up to
+    // ~1/3 of the cap when direction is BULLISH/BEARISH, so the contract has
+    // a real chance to make money inside the horizon.
+    const HORIZON_TARGET_FLOOR: Record<string, number> = {
+      "1h":  0.0035, // 0.35% — typical 1h scalp move on liquid equity
+      "4h":  0.0070, // 0.70%
+      "1d":  0.0120, // 1.20%
+      "1w":  0.0250, // 2.5%
+      "2w":  0.0350,
+      "1m":  0.0500,
+      "3m":  0.0800,
     };
     const cap = HORIZON_TARGET_CAP[args.horizon] ?? 0.18;
+    const floor = HORIZON_TARGET_FLOOR[args.horizon] ?? 0.0;
     if (targetPrice && quote?.price) {
       const move = (targetPrice - quote.price) / quote.price;
+      // Cap (down): trim 3σ-tail predictions back to realistic envelope.
       if (move >  cap) targetPrice = quote.price * (1 + cap);
       if (move < -cap) targetPrice = quote.price * (1 - cap);
+      // Floor (up): if the model picked a directional view but with a target
+      // too small to scalp, expand toward floor so the chart reflects a
+      // tradeable expected move (still bounded by the cap above).
+      if (floor > 0 && Math.abs(move) < floor) {
+        if (direction === "BULLISH") targetPrice = quote.price * (1 + floor);
+        else if (direction === "BEARISH") targetPrice = quote.price * (1 - floor);
+        // NEUTRAL keeps the tiny target — no floor, since no trade.
+      }
     }
-    // Fallback: derive a target from direction + confidence if model omitted it.
-    // Scaled by realistic per-horizon move expectations so the synthetic target
-    // is also calibrated, not arbitrary.
+    // Fallback: derive a target from direction + confidence if model omitted
+    // it. Now covers intraday horizons too, scaled by √t so the synthetic
+    // target obeys the same vol-scaling math the prompt uses.
     if (!targetPrice && quote?.price) {
       const horizonScale: Record<string, number> = {
-        "1d": 0.012, "1w": 0.025, "2w": 0.04, "1m": 0.06, "3m": 0.10,
+        "1h":  0.005, "4h":  0.010, "1d":  0.020,
+        "1w":  0.030, "2w":  0.045, "1m":  0.065, "3m":  0.110,
       };
       const base = horizonScale[args.horizon] ?? 0.025;
-      const magnitude = base * (0.5 + confidence);
+      const magnitude = base * (0.6 + 0.5 * confidence);
       if (direction === "BULLISH") targetPrice = quote.price * (1 + magnitude);
       else if (direction === "BEARISH") targetPrice = quote.price * (1 - magnitude);
       else targetPrice = quote.price;
