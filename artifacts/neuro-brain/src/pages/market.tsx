@@ -1127,7 +1127,11 @@ function LivePriceChart({
   const dims = useMemo(() => {
     const w = containerW;
     const hasForecast = prediction?.targetPrice != null;
-    const h = isNarrow ? (hasForecast ? 360 : 320) : (hasForecast ? 460 : 420);
+    // Lock chart height regardless of whether a forecast is present. Otherwise
+    // the container resizes the moment a prediction arrives (or the user pinch-
+    // zooms past the threshold that toggles isNarrow), and the chart visibly
+    // "squishes" as the layout reflows mid-gesture. Constant height = no jumps.
+    const h = isNarrow ? 360 : 460;
     // Dynamically size the left gutter so the y-axis price labels never get
     // clipped. Without this, 6-digit prices like BTC ($79,803.41) lose their
     // leading digit on mobile and the chart looks wrong even though the data
@@ -1195,6 +1199,27 @@ function LivePriceChart({
   // Reset zoom when the user changes the range selector (1D / 5D / 1M / etc.)
   // — otherwise a zoom from the 5D view would carry over awkwardly into 1M.
   useEffect(() => { setZoomWindow(null); }, [rangeKey]);
+
+  // requestAnimationFrame-throttled zoom commit. Pinch and pan fire ~60 events
+  // per second; without throttling, every event triggers a full chart re-render
+  // (the `view` useMemo recomputes every candle's pixel position) and the
+  // gesture feels laggy / drops frames. Coalesce all updates into one per
+  // animation frame so we stay smooth.
+  const rafRef = useRef<number | null>(null);
+  const pendingZoomRef = useRef<{ t0: number; t1: number } | null | undefined>(undefined);
+  useEffect(() => () => {
+    if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+  }, []);
+  const queueZoom = useCallback((win: { t0: number; t1: number } | null) => {
+    pendingZoomRef.current = win;
+    if (rafRef.current != null) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      const next = pendingZoomRef.current;
+      pendingZoomRef.current = undefined;
+      if (next !== undefined) setZoomWindow(next);
+    });
+  }, []);
 
   const view = useMemo(() => {
     if (histCandles.length === 0 || !livePivot) return null;
@@ -1317,12 +1342,111 @@ function LivePriceChart({
   // the prediction's target. Re-evaluated every second via `nowMs` so the
   // chart visibly "breathes" — the tail end stays at the target but the head
   // tracks every tick.
+  //
+  // We don't draw a single straight diagonal anymore — that just shows
+  // "direction" and made bearish forecasts look like a single red ramp. Real
+  // markets don't move in straight lines, so we generate a *realistic-looking*
+  // forecast price path: a deterministic seeded random walk that starts at the
+  // live price, ends exactly at the target, and wiggles in between with an
+  // amplitude proportional to the predicted move size and the watch's recent
+  // volatility. Same prediction → same path, so it doesn't reshuffle on every
+  // re-render. We also build a confidence cone (bull/bear envelope) so the
+  // user can see the *range* of plausible outcomes, not just the median path.
   const liveProjection = useMemo(() => {
     if (!view || !dims.hasForecast || !livePivot || prediction?.targetPrice == null) return null;
     const startT = livePivot.t;
     const startC = livePivot.c;
     const endT = view.fcastEnd;
     const endC = prediction.targetPrice;
+
+    // Recent volatility from the historical candles — used to scale the wiggle
+    // so blue-chip names get a calm path and meme stocks get a jagged one.
+    let vol = 0;
+    const tail = histCandles.slice(-30);
+    if (tail.length >= 2) {
+      let sumAbs = 0; let n = 0;
+      for (let i = 1; i < tail.length; i++) {
+        const prev = tail[i - 1].c;
+        if (prev > 0) { sumAbs += Math.abs(tail[i].c - prev) / prev; n++; }
+      }
+      if (n > 0) vol = sumAbs / n;
+    }
+    const totalChange = endC - startC;
+    // Amplitude blends predicted-move size with realised volatility. Bounded
+    // so a tiny prediction doesn't disappear and a huge one doesn't go wild.
+    const amp = Math.max(
+      startC * 0.0015,
+      Math.min(
+        startC * 0.04,
+        Math.abs(totalChange) * 0.22 + startC * vol * 1.6,
+      ),
+    );
+
+    // Seeded RNG so the same prediction always renders the same path. Seed
+    // off the prediction id + target so a fresh prediction draws a fresh path.
+    const seedKey = `${prediction?.id ?? "p"}|${prediction?.targetPrice}|${prediction?.direction ?? ""}|${startT}`;
+    let seed = 2166136261 >>> 0;
+    for (let i = 0; i < seedKey.length; i++) {
+      seed = (seed ^ seedKey.charCodeAt(i)) >>> 0;
+      seed = Math.imul(seed, 16777619) >>> 0;
+    }
+    const rand = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 0xFFFFFFFF;
+    };
+
+    const STEPS = 48;
+    const pts: { t: number; c: number; up: number; down: number }[] = [];
+    // Build the wiggle as a smoothed brownian-ish walk, then *force* it to
+    // land on the target by interpolating out the residual error linearly.
+    const raw: number[] = [0];
+    for (let i = 1; i <= STEPS; i++) {
+      const step = (rand() - 0.5) * 2;          // -1..+1
+      const prev = raw[i - 1];
+      raw.push(prev * 0.78 + step);             // mild momentum, no runaway drift
+    }
+    const lastRaw = raw[STEPS] || 1;
+    for (let i = 0; i <= STEPS; i++) {
+      const f = i / STEPS;
+      const t = startT + (endT - startT) * f;
+      // Linear baseline from current price → target
+      const base = startC + totalChange * f;
+      // Subtract the linear drift in the raw walk so the path lands on target
+      const detrended = raw[i] - lastRaw * f;
+      // Envelope: 0 at both endpoints (path is pinned), peaks in the middle
+      const env = Math.sin(Math.PI * f);
+      const wiggle = detrended * amp * env * 0.55;
+      const c = base + wiggle;
+      // Confidence cone bounds — widen with sqrt(time) like a real forecast
+      const cone = amp * Math.sqrt(f) * 1.4;
+      pts.push({ t, c, up: base + cone, down: base - cone });
+    }
+
+    // SVG path strings for the median path and the confidence band.
+    let median = "";
+    let upper = "";
+    let lower = "";
+    for (let i = 0; i <= STEPS; i++) {
+      const p = pts[i];
+      const x = view.xOf(p.t);
+      median += `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${view.yOf(p.c).toFixed(1)} `;
+      upper  += `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${view.yOf(p.up).toFixed(1)} `;
+      lower  += `${i === 0 ? "L" : "L"}${x.toFixed(1)} ${view.yOf(p.down).toFixed(1)} `;
+    }
+    // Reverse the lower curve onto the upper to make a closed band polygon.
+    const conePath = (() => {
+      let s = "";
+      for (let i = 0; i <= STEPS; i++) {
+        const p = pts[i];
+        s += `${i === 0 ? "M" : "L"}${view.xOf(p.t).toFixed(1)} ${view.yOf(p.up).toFixed(1)} `;
+      }
+      for (let i = STEPS; i >= 0; i--) {
+        const p = pts[i];
+        s += `L${view.xOf(p.t).toFixed(1)} ${view.yOf(p.down).toFixed(1)} `;
+      }
+      return s + "Z";
+    })();
+
     return {
       x1: view.xOf(startT),
       y1: view.yOf(startC),
@@ -1331,8 +1455,12 @@ function LivePriceChart({
       startC,
       endC,
       changePct: ((endC - startC) / startC) * 100,
+      pathD: median.trim(),
+      upperD: upper.trim(),
+      lowerD: lower.trim(),
+      coneD: conePath.trim(),
     };
-  }, [view, dims.hasForecast, livePivot, prediction, nowMs]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [view, dims.hasForecast, livePivot, prediction, histCandles, nowMs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fmtPrice = (v: number) => v.toLocaleString(undefined, { maximumFractionDigits: v >= 100 ? 2 : 4 });
   // Mountain Standard Arizona Time. Arizona doesn't observe daylight saving,
@@ -1425,7 +1553,11 @@ function LivePriceChart({
         </div>
       </CardHeader>
       <CardContent className="p-0 sm:p-6">
-        <div ref={containerRef} className="w-full overflow-hidden relative" style={{ height: dims.h || 320 }}>
+        <div
+          ref={containerRef}
+          className="w-full overflow-hidden relative touch-none select-none"
+          style={{ height: dims.h || 320 }}
+        >
         {/* Floating zoom controls — overlay top-right of the chart. Visible
             on every device so mobile users (who can't mouse-wheel) can zoom too. */}
         {view && containerW > 0 && (
@@ -1500,7 +1632,7 @@ function LivePriceChart({
               let t1 = t0 + newSpan;
               if (t0 < view.fullTMin) { t1 += view.fullTMin - t0; t0 = view.fullTMin; }
               if (t1 > view.fullTMax) { t0 -= t1 - view.fullTMax; t1 = view.fullTMax; }
-              setZoomWindow({ t0, t1 });
+              queueZoom({ t0, t1 });
             }}
             onPointerDown={(e) => {
               if (!view) return;
@@ -1529,7 +1661,7 @@ function LivePriceChart({
               let t1 = p.startT1 + dt;
               if (t0 < view.fullTMin) { t1 += view.fullTMin - t0; t0 = view.fullTMin; }
               if (t1 > view.fullTMax) { t0 -= t1 - view.fullTMax; t1 = view.fullTMax; }
-              setZoomWindow({ t0, t1 });
+              queueZoom({ t0, t1 });
             }}
             onPointerUp={(e) => {
               if (panRef.current?.pointerId === e.pointerId) {
@@ -1605,7 +1737,7 @@ function LivePriceChart({
               let nt1 = nt0 + newSpan;
               if (nt0 < view.fullTMin) { nt1 += view.fullTMin - nt0; nt0 = view.fullTMin; }
               if (nt1 > view.fullTMax) { nt0 -= nt1 - view.fullTMax; nt1 = view.fullTMax; }
-              setZoomWindow({ t0: nt0, t1: nt1 });
+              queueZoom({ t0: nt0, t1: nt1 });
             }}
             onTouchEnd={(e) => {
               if (e.touches.length < 2) {
@@ -1790,18 +1922,54 @@ function LivePriceChart({
                   width={view.fcastPxEnd - view.histPxEnd}
                   height={view.y1 - view.y0}
                   fill={view.fcastColor} opacity={0.05} />
-                {/* projection envelope (triangle shading toward target) */}
-                <path d={`M${liveProjection.x1} ${liveProjection.y1} L${liveProjection.x2} ${liveProjection.y2} L${liveProjection.x2} ${view.y1} L${liveProjection.x1} ${view.y1} Z`}
-                  fill={view.fcastColor} opacity={0.08} />
-                {/* projection line — re-drawn every second from current live price */}
+                {/* CONFIDENCE CONE — wider toward the horizon end. Shows the
+                    plausible price range around the median path so the user
+                    sees not just "down", but how far down it could realistically
+                    go (and how far up it might still bounce). */}
+                <path d={liveProjection.coneD}
+                  fill={view.fcastColor} opacity={0.10}
+                  stroke={view.fcastColor} strokeOpacity={0.25} strokeWidth={0.8} />
+                {/* faint straight reference: target trajectory midline */}
                 <line x1={liveProjection.x1} y1={liveProjection.y1}
                   x2={liveProjection.x2} y2={liveProjection.y2}
-                  stroke={view.fcastColor} strokeWidth={2.4} strokeDasharray="6 4">
-                  <animate attributeName="stroke-dashoffset" from="0" to="-20" dur="1.2s" repeatCount="indefinite" />
-                </line>
+                  stroke={view.fcastColor} strokeWidth={1} strokeDasharray="2 4" opacity={0.35} />
+                {/* REALISTIC FORECAST PATH — wavy projected price trajectory
+                    that lands at the target. Looks like a real chart, not an
+                    arrow. Drawn solid + an animated dashed overlay so it
+                    visibly "lives" without obscuring the shape. */}
+                <path d={liveProjection.pathD}
+                  fill="none"
+                  stroke={view.fcastColor}
+                  strokeWidth={2.2}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  opacity={0.95} />
+                <path d={liveProjection.pathD}
+                  fill="none"
+                  stroke={view.fcastColor}
+                  strokeWidth={2.6}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeDasharray="6 6"
+                  opacity={0.55}>
+                  <animate attributeName="stroke-dashoffset" from="0" to="-24" dur="1.4s" repeatCount="indefinite" />
+                </path>
                 {/* target dot at horizon end */}
                 <circle cx={liveProjection.x2} cy={liveProjection.y2} r={5}
                   fill={view.fcastColor} stroke="hsl(var(--background))" strokeWidth={1.5} />
+                {/* target price label next to the dot so users can read the
+                    projected level without hovering. */}
+                <text
+                  x={liveProjection.x2 - 6}
+                  y={liveProjection.y2 - 6}
+                  textAnchor="end"
+                  fontSize={isNarrow ? "9" : "10"}
+                  fontFamily="monospace"
+                  fontWeight="bold"
+                  fill={view.fcastColor}
+                >
+                  {fmtPrice(liveProjection.endC)}
+                </text>
                 {/* PREDICTION LABEL inside the chart */}
                 {(() => {
                   const labelX = view.histPxEnd + (view.fcastPxEnd - view.histPxEnd) * 0.5;
