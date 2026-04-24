@@ -42,7 +42,16 @@ export interface BacktestResult {
   fetchedAt: string;
 }
 
+// Backtest works on daily candles, so intraday horizons (1h / 4h) collapse
+// to a 1-day forward window for the purpose of historical accuracy scoring.
+// This is a known limitation — true intraday backtesting would need 1m/5m
+// bar history we don't currently store. For now the 1-day proxy is honest
+// (it tells the user "your 1h calls were right ~X% of the time on a same-day
+// closing basis") and prevents the route from erroring when the user picks
+// a 1h horizon and asks to see the backtest panel.
 const HORIZON_TRADING_DAYS: Record<string, number> = {
+  "1h": 1,
+  "4h": 1,
   "1d": 1,
   "1w": 5,
   "1m": 21,

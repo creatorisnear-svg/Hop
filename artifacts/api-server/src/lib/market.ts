@@ -934,11 +934,26 @@ D. Compute targetPrice with this formula, NOT a guess:
      expected_pct ≈ direction_sign * confidence * min(MAX_PCT, k * volatility20d * sqrt(horizon_days/20))
    where k = 1.0 for stocks/ETFs, 1.5 for crypto/forex/index, horizon_days as listed below,
    then round to a clean number near the live quote.
-   Horizon → days: "1d"=1, "1w"=5, "2w"=10, "1m"=21, "3m"=63.
-   Horizon → MAX_PCT cap (HARD CEILING): "1d"=4, "1w"=8, "2w"=12, "1m"=18, "3m"=25.
-   A 20% intraday move is an outlier event — do NOT predict that for a "1d" horizon
-   no matter how confident you feel; cap at 4% for 1d. This calibrates targets to
-   the actual statistical distribution of moves at each horizon.
+   Horizon → days: "1h"=0.05, "4h"=0.17, "1d"=1, "1w"=5, "2w"=10, "1m"=21, "3m"=63.
+   Horizon → MAX_PCT cap (HARD CEILING): "1h"=1.5, "4h"=2.5, "1d"=4, "1w"=8, "2w"=12, "1m"=18, "3m"=25.
+   A 20% intraday move is an outlier event — do NOT predict that for any intraday horizon
+   no matter how confident you feel. These caps calibrate targets to the actual
+   statistical distribution of moves at each horizon.
+
+CONTEXT — THIS IS A DAY-TRADING PUTS-AND-CALLS ASSISTANT:
+The user is overwhelmingly trading short-dated options (0DTE / weeklies). When the
+horizon is "1h", "4h", or "1d", treat this as an intraday options scalp:
+  - Lean on the LATEST intraday session move, pre-market gap, RSI14, and any
+    same-day news. Multi-month earnings cycles matter much less for a 1h trade.
+  - strikeHint should usually be ATM or 1-strike OTM (the cheapest delta-aware
+    contract that benefits from the predicted move within the time window).
+  - expiryHint should match the horizon literally: "0DTE" for 1h/4h/1d when
+    same-day expiries exist (SPY/QQQ/major liquid names), otherwise the next
+    weekly Friday. Never suggest 30-45 DTE for a 1h horizon.
+  - entryTrigger should be a level the user can watch on a 1m / 5m chart RIGHT
+    NOW (e.g. "Break above today's VWAP" or "Reject from yesterday's high").
+For longer horizons ("1w", "1m", "3m"), behave normally: weekly/monthly contracts,
+strikes can be 1-2 OTM, expiries 7-45 DTE depending on horizon.
 E. Translate to options signal:
    - BUY_CALL when BULLISH and confidence ≥ 0.55
    - BUY_PUT when BEARISH and confidence ≥ 0.55
@@ -1281,6 +1296,8 @@ Rules:
     // almost certainly a model hallucination, so we trim it back instead of
     // letting it distort the forecast chart and the option-trade signal.
     const HORIZON_TARGET_CAP: Record<string, number> = {
+      "1h":  0.015,  // ±1.5% in 1 hour (a strong scalp)
+      "4h":  0.025,  // ±2.5% in 4 hours (a notable intraday move)
       "1d":  0.04,   // ±4% intraday  (≈ 2-3σ on a 1.5% daily-vol stock)
       "1w":  0.08,   // ±8% in a week
       "2w":  0.12,   // ±12% in two weeks
@@ -1415,6 +1432,8 @@ Rules:
 }
 
 const HORIZON_MS: Record<string, number> = {
+  "1h": 1 * 3600_000,
+  "4h": 4 * 3600_000,
   "1d": 24 * 3600_000,
   "1w": 7 * 24 * 3600_000,
   "1m": 30 * 24 * 3600_000,

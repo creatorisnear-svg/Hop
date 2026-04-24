@@ -277,9 +277,14 @@ const MARKET_OPTIONS = [
   { value: "commodity", label: "Commodity" },
 ];
 
+// Day-trading-first horizons. The first three are intraday/0DTE scalping
+// windows (the bread-and-butter of the puts/calls trader this app is built
+// for); the rest are kept for swing positions and weekly/monthly contracts.
 const HORIZON_OPTIONS = [
-  { value: "1d", label: "1 day" },
-  { value: "1w", label: "1 week" },
+  { value: "1h", label: "1 hour scalp" },
+  { value: "4h", label: "4 hour swing" },
+  { value: "1d", label: "End of day (0DTE)" },
+  { value: "1w", label: "1 week (weeklies)" },
   { value: "1m", label: "1 month" },
   { value: "3m", label: "3 months" },
 ];
@@ -655,7 +660,11 @@ function WatchDetail({ watch }: { watch: Watch }) {
   const [earningsLoading, setEarningsLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [predicting, setPredicting] = useState(false);
-  const [horizon, setHorizon] = useState("1w");
+  // Default to "End of day (0DTE)" — this app is built for day-trading puts
+  // and calls, so the default horizon should match the most common option-trade
+  // duration. Users can still pick longer horizons from the dropdown for swing
+  // / weekly / monthly contracts.
+  const [horizon, setHorizon] = useState("1d");
   const [trades, setTrades] = useState<UserTrade[]>([]);
 
   const loadTrades = useCallback(async () => {
@@ -775,18 +784,17 @@ function WatchDetail({ watch }: { watch: Watch }) {
     return () => clearInterval(id);
   }, [load]);
 
-  // Track whether the user wants the prediction to re-run automatically in
-  // the background. Default OFF — the user opts in by toggling "Auto", which
-  // avoids silently burning Gemini quota on a watch they may have just opened
-  // to glance at the chart.
-  const [autoPredict, setAutoPredict] = useState(false);
+  // Predictions are user-initiated only — tap "Predict now" when you want a
+  // fresh verdict. No silent background re-runs (the chart's live-tick
+  // animation already keeps the price visually current; the AI verdict only
+  // needs to refresh when the user is ready to act on it).
   const predictingRef = useRef(false);
   useEffect(() => { predictingRef.current = predicting; }, [predicting]);
 
-  const runPredict = useCallback(async (silent = false) => {
+  const runPredict = useCallback(async () => {
     if (predictingRef.current) return;
     predictingRef.current = true;
-    if (!silent) setPredicting(true);
+    setPredicting(true);
     try {
       const r = await fetch(`/api/market/watches/${watch.id}/predict`, {
         method: "POST",
@@ -796,29 +804,14 @@ function WatchDetail({ watch }: { watch: Watch }) {
       const data = await r.json();
       if (!r.ok) throw new Error(data.error ?? "Prediction failed");
       setPredictions((prev) => [data.prediction, ...prev]);
-      if (!silent) toast.success(`${data.prediction.direction} verdict for ${watch.symbol}`);
+      toast.success(`${data.prediction.direction} verdict for ${watch.symbol}`);
     } catch (err) {
-      if (!silent) toast.error(err instanceof Error ? err.message : "Prediction failed");
+      toast.error(err instanceof Error ? err.message : "Prediction failed");
     } finally {
       predictingRef.current = false;
-      if (!silent) setPredicting(false);
+      setPredicting(false);
     }
   }, [watch.id, watch.symbol, horizon]);
-
-  // Silent auto re-prediction every 60s when enabled. The chart's projection
-  // line still re-anchors every second to the latest live tick — this loop
-  // refreshes the underlying AI verdict + target price periodically so the
-  // projection stays current with breaking news / earnings moves.
-  useEffect(() => {
-    if (!autoPredict) return;
-    // Re-run the ensemble every 3 minutes (was 60s). Live-price ticks still
-    // animate every second on the chart, so the projection line stays
-    // visually current — this only paces how often we burn Gemini quota
-    // refreshing the underlying AI verdict. 3 min × 3-call ensemble = 60
-    // calls/hour per watch, vs the old 5 × 60 = 300 calls/hour.
-    const id = setInterval(() => { void runPredict(true); }, 180_000);
-    return () => clearInterval(id);
-  }, [autoPredict, runPredict]);
 
   const latest = predictions[0];
 
@@ -848,35 +841,11 @@ function WatchDetail({ watch }: { watch: Watch }) {
                   ))}
                 </SelectContent>
               </Select>
-              <Button onClick={() => void runPredict(false)} disabled={predicting} className="flex-1 sm:flex-initial">
+              <Button onClick={() => void runPredict()} disabled={predicting} className="flex-1 sm:flex-initial">
                 {predicting ? (
                   <><Loader2 className="w-4 h-4 sm:mr-2 animate-spin" /><span className="hidden sm:inline">Predicting…</span></>
                 ) : (
                   <><Sparkles className="w-4 h-4 sm:mr-2" /><span className="hidden sm:inline">Predict now</span><span className="sm:hidden">Predict</span></>
-                )}
-              </Button>
-              <Button
-                variant={autoPredict ? "default" : "outline"}
-                size="sm"
-                onClick={() => setAutoPredict((v) => !v)}
-                className={`shrink-0 ${autoPredict ? "bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-500" : "text-muted-foreground"}`}
-                title={autoPredict
-                  ? "Auto-predict is ON — re-runs every 3 minutes in the background. Click to turn OFF."
-                  : "Auto-predict is OFF — predictions only run when you press Predict. Click to turn ON."}
-              >
-                {autoPredict ? (
-                  <span className="inline-flex items-center gap-1.5">
-                    <span className="relative inline-flex h-2 w-2">
-                      <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-200 opacity-75 animate-ping" />
-                      <span className="relative inline-flex h-2 w-2 rounded-full bg-white" />
-                    </span>
-                    Auto ON
-                  </span>
-                ) : (
-                  <span className="inline-flex items-center gap-1.5 opacity-80">
-                    <span className="inline-block h-2 w-2 rounded-full bg-muted-foreground/50" />
-                    Auto OFF
-                  </span>
                 )}
               </Button>
               <Button variant="ghost" size="icon" onClick={() => void load()} className="shrink-0">
@@ -948,6 +917,8 @@ function directionMeta(d: Prediction["direction"]) {
 }
 
 const HORIZON_MS: Record<string, number> = {
+  "1h": 1 * 3600_000,
+  "4h": 4 * 3600_000,
   "1d": 24 * 3600_000,
   "1w": 7 * 24 * 3600_000,
   "1m": 30 * 24 * 3600_000,
