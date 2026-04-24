@@ -4,6 +4,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { useListSynapses } from "@workspace/api-client-react";
 import { cn } from "@/lib/utils";
 
 interface BrainVisualProps {
@@ -112,7 +113,23 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
   const lastActiveAtRef = useRef<Record<string, number>>({});
   const lastSpawnRef = useRef<number>(0);
   const focusTargetRef = useRef<string | null>(null);
+  // Map of "from->to" -> learned synapse strength (0..1). Read live by the
+  // animation loop to weight edge brightness and pulse-spawning probability.
+  const synStrengthRef = useRef<Record<string, number>>({});
   const [webglFailed, setWebglFailed] = useState(false);
+
+  // Pull learned synapse strengths from the backend; refresh while a run is
+  // active so newly reinforced pathways light up without a page reload.
+  const { data: synapsesData } = useListSynapses({
+    query: { refetchInterval: activeRegion ? 4000 : 30000 },
+  });
+  useEffect(() => {
+    const map: Record<string, number> = {};
+    for (const s of synapsesData ?? []) {
+      map[`${s.fromRegion}->${s.toRegion}`] = s.strength;
+    }
+    synStrengthRef.current = map;
+  }, [synapsesData]);
 
   // keep the latest activeRegion accessible inside the animation loop
   useEffect(() => {
@@ -285,25 +302,59 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
       regionRefs[key] = { base, points, glow, labelEl, activity: 0 };
     }
 
-    // Connection lines (faint, always shown)
+    // Connection lines: always include the hardcoded topology, plus add an
+    // edge for any learned synapse pair we don't already have. Each edge is
+    // tagged with its (from,to) keys so the animation loop can look up the
+    // current learned strength and modulate brightness/color in real time.
+    type EdgeRef = {
+      from: string;
+      to: string;
+      mat: THREE.LineBasicMaterial;
+      baseColor: THREE.Color;
+      hotColor: THREE.Color;
+    };
     const lineGroup = new THREE.Group();
-    for (const [a, b] of CONNECTIONS) {
+    const edgeRefs: EdgeRef[] = [];
+    const seenEdges = new Set<string>();
+    const baseColor = new THREE.Color(0x335577);
+    const hotColor = new THREE.Color(0xffb347); // warm amber for strong pathways
+
+    function addEdge(a: string, b: string) {
       const la = REGION_LAYOUT[a];
       const lb = REGION_LAYOUT[b];
-      if (!la || !lb) continue;
+      if (!la || !lb) return;
+      // Treat edges as undirected for visualization
+      const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+      if (seenEdges.has(key)) return;
+      seenEdges.add(key);
       const geo = new THREE.BufferGeometry().setFromPoints([
         new THREE.Vector3(la.x, la.y, la.z),
         new THREE.Vector3(lb.x, lb.y, lb.z),
       ]);
       const mat = new THREE.LineBasicMaterial({
-        color: 0x335577,
+        color: baseColor.clone(),
         transparent: true,
         opacity: 0.22,
         blending: THREE.AdditiveBlending,
       });
       lineGroup.add(new THREE.Line(geo, mat));
+      edgeRefs.push({ from: a, to: b, mat, baseColor, hotColor });
+    }
+    for (const [a, b] of CONNECTIONS) addEdge(a, b);
+    // Pull in any learned pairs already known at mount time so they appear
+    // immediately. (Pairs learned later still light up the matching base edge
+    // via the animation loop, but won't add new geometry post-mount.)
+    for (const key of Object.keys(synStrengthRef.current)) {
+      const [a, b] = key.split("->");
+      if (a && b) addEdge(a, b);
     }
     scene.add(lineGroup);
+
+    // Look up undirected learned strength for an edge (max of either direction)
+    function edgeStrength(a: string, b: string): number {
+      const m = synStrengthRef.current;
+      return Math.max(m[`${a}->${b}`] ?? 0, m[`${b}->${a}`] ?? 0);
+    }
 
     // Signal particles
     const MAX_SIGNALS = 80;
@@ -418,24 +469,53 @@ export function BrainVisual({ activeRegion, className }: BrainVisualProps) {
         }
       }
 
-      // Spawn signals from / to active region along its connections
+      // Animate edge brightness from learned synapse strength so pathways the
+      // brain actually uses glow brighter than dormant ones.
+      for (const e of edgeRefs) {
+        const strength = edgeStrength(e.from, e.to); // 0..1
+        const isActiveEdge = active === e.from || active === e.to;
+        // Subtle breathing for hot edges
+        const breathe = 0.85 + Math.sin(timeAcc * 2 + e.from.length) * 0.15;
+        const targetOpacity =
+          (0.18 + strength * 0.55 + (isActiveEdge ? 0.2 : 0)) * breathe;
+        e.mat.opacity += (targetOpacity - e.mat.opacity) * Math.min(1, dt * 4);
+        // Lerp color from cool baseline to warm amber as strength grows
+        e.mat.color.copy(e.baseColor).lerp(e.hotColor, Math.min(1, strength));
+      }
+
+      // Spawn signals from / to active region along its connections, biased
+      // toward pathways with higher learned strength.
       if (active && timeAcc - lastSpawnRef.current > 0.05) {
         lastSpawnRef.current = timeAcc;
         const color = REGION_COLORS[active] ?? 0xffffff;
-        const peers = CONNECTIONS.filter(
-          ([a, b]) => a === active || b === active,
-        );
+        // Build weighted peer list from any edge touching the active region.
+        const peers = edgeRefs
+          .filter((e) => e.from === active || e.to === active)
+          .map((e) => {
+            const other = e.from === active ? e.to : e.from;
+            const w = 0.3 + edgeStrength(e.from, e.to) * 0.9; // 0.3..1.2
+            return { other, w };
+          });
         if (peers.length > 0 && Math.random() < 0.7) {
-          const [a, b] = peers[Math.floor(Math.random() * peers.length)];
+          const totalW = peers.reduce((s, p) => s + p.w, 0);
+          let pick = Math.random() * totalW;
+          let chosen = peers[0];
+          for (const p of peers) {
+            pick -= p.w;
+            if (pick <= 0) {
+              chosen = p;
+              break;
+            }
+          }
           // direction: outgoing from active most of the time
           if (Math.random() < 0.7) {
-            const from = active;
-            const to = a === active ? b : a;
-            spawnSignal(from, to, color);
+            spawnSignal(active, chosen.other, color);
           } else {
-            const from = a === active ? b : a;
-            const to = active;
-            spawnSignal(from, to, REGION_COLORS[from] ?? color);
+            spawnSignal(
+              chosen.other,
+              active,
+              REGION_COLORS[chosen.other] ?? color,
+            );
           }
         }
       }
