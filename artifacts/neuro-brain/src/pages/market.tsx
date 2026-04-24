@@ -810,7 +810,12 @@ function WatchDetail({ watch }: { watch: Watch }) {
   // projection stays current with breaking news / earnings moves.
   useEffect(() => {
     if (!autoPredict) return;
-    const id = setInterval(() => { void runPredict(true); }, 60_000);
+    // Re-run the ensemble every 3 minutes (was 60s). Live-price ticks still
+    // animate every second on the chart, so the projection line stays
+    // visually current — this only paces how often we burn Gemini quota
+    // refreshing the underlying AI verdict. 3 min × 3-call ensemble = 60
+    // calls/hour per watch, vs the old 5 × 60 = 300 calls/hour.
+    const id = setInterval(() => { void runPredict(true); }, 180_000);
     return () => clearInterval(id);
   }, [autoPredict, runPredict]);
 

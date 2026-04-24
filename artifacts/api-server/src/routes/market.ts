@@ -173,12 +173,16 @@ router.post("/market/watches/:id/predict", async (req, res) => {
   if (!watch) return res.status(404).json({ error: "watch not found" });
 
   try {
-    // Allow caller to override (1..5). Default bumped to 5 — gives us full
-    // temperature spread (0.1 → 0.7) so consensus is statistically tighter.
+    // Allow caller to override (1..5). Default is 3 — keeps a meaningful
+    // temperature spread (0.1 / 0.4 / 0.7) for consensus while burning ~40%
+    // less Gemini quota per prediction than the previous default of 5. With
+    // Auto-predict on, that means a single watch on autopilot uses 3 keys
+    // per cycle instead of 5, dramatically extending how long the free-tier
+    // pool lasts before any key trips its daily quota.
     const ensembleRaw = Number(req.body?.ensemble);
     const ensemble = Number.isFinite(ensembleRaw)
       ? Math.max(1, Math.min(5, Math.floor(ensembleRaw)))
-      : 5;
+      : 3;
 
     // ── Self-calibration: feed the model its own recent track record ─────
     // Pull the last 20 predictions on this watch, evaluate each against the
