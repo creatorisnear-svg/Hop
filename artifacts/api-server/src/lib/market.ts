@@ -583,17 +583,66 @@ export interface PredictArgs {
   notes?: string;
 }
 
+function indicatorsBlock(ind: IndicatorsResult | null): string {
+  if (!ind || ind.price == null) return "(indicators unavailable)";
+  const lines: string[] = [];
+  lines.push(`Last close: ${ind.price.toFixed(2)}`);
+  if (ind.change1d != null) lines.push(`1d change: ${ind.change1d.toFixed(2)}%`);
+  if (ind.change5d != null) lines.push(`5d change: ${ind.change5d.toFixed(2)}%`);
+  if (ind.change1m != null) lines.push(`1m change: ${ind.change1m.toFixed(2)}%`);
+  if (ind.sma20 != null) lines.push(`SMA20: ${ind.sma20.toFixed(2)} (price ${ind.price > ind.sma20 ? "above" : "below"})`);
+  if (ind.sma50 != null) lines.push(`SMA50: ${ind.sma50.toFixed(2)} (price ${ind.price > ind.sma50 ? "above" : "below"})`);
+  if (ind.rsi14 != null) {
+    const rsiTag = ind.rsi14 >= 70 ? "overbought" : ind.rsi14 <= 30 ? "oversold" : "neutral";
+    lines.push(`RSI14: ${ind.rsi14.toFixed(1)} (${rsiTag})`);
+  }
+  if (ind.high52w != null && ind.low52w != null) {
+    const pos = ind.high52w !== ind.low52w
+      ? ((ind.price - ind.low52w) / (ind.high52w - ind.low52w)) * 100
+      : null;
+    lines.push(`52w high: ${ind.high52w.toFixed(2)} · low: ${ind.low52w.toFixed(2)}${pos != null ? ` (price at ${pos.toFixed(0)}% of range)` : ""}`);
+  }
+  if (ind.volatility20d != null) lines.push(`20d daily volatility: ${ind.volatility20d.toFixed(2)}%`);
+  return lines.join("\n");
+}
+
+function intradayBlock(s: CandleSeries | null): string {
+  if (!s || s.candles.length === 0) return "(intraday data unavailable)";
+  const c = s.candles;
+  const last = c[c.length - 1];
+  const first = c[0];
+  let hi = -Infinity;
+  let lo = Infinity;
+  for (const k of c) {
+    if (k.h > hi) hi = k.h;
+    if (k.l < lo) lo = k.l;
+  }
+  const session = ((last.c - first.o) / first.o) * 100;
+  // Last ~20 bars summarised so the model can see momentum without 200 lines.
+  const tail = c.slice(-20);
+  const recent = tail
+    .map((k) => `${new Date(k.t).toISOString().slice(11, 16)} O${k.o.toFixed(2)} H${k.h.toFixed(2)} L${k.l.toFixed(2)} C${k.c.toFixed(2)}`)
+    .join("\n");
+  return `Bars: ${c.length} · Session range: ${lo.toFixed(2)} – ${hi.toFixed(2)}\nSession move (open→close): ${session.toFixed(2)}%\nLast 20 bars (${s.interval}):\n${recent}`;
+}
+
 export async function predictMarket(args: PredictArgs): Promise<PredictionResult> {
   const start = Date.now();
   const query = `${args.name} ${args.symbol} stock market news`;
   // Earnings are only relevant for actual stocks. Skip the API call for crypto,
   // forex and indexes — they'll just say "unavailable" anyway.
   const isStockLike = args.market === "stock" || args.market === "etf";
-  const [headlines, quote, earnings] = await Promise.all([
+  const [headlines, quote, earnings, dailyCandles, intraCandles] = await Promise.all([
     fetchHeadlines(query),
     fetchYahooQuote(args.symbol),
     isStockLike ? fetchEarnings(args.symbol) : Promise.resolve<EarningsInfo | null>(null),
+    fetchYahooCandles(args.symbol, "1d", "1y"),
+    fetchYahooCandles(args.symbol, "5m", "1d"),
   ]);
+
+  const indicators = dailyCandles
+    ? computeIndicators(args.symbol, dailyCandles.candles.map((k) => k.c))
+    : null;
 
   const headlineBlock = headlines.length
     ? headlines
@@ -609,17 +658,24 @@ export async function predictMarket(args: PredictArgs): Promise<PredictionResult
       }`
     : "(no live quote available)";
 
-  const prompt = `You are a market analysis assistant inside the NeuroLinked Brain. Produce a probabilistic forecast AND an options trade signal for the asset below.
+  const prompt = `You are a quantitative market analyst inside the NeuroLinked Brain. Produce a probabilistic forecast AND an options trade signal for the asset below. Ground EVERY claim in the data shown — no speculation.
 
 ASSET
 - Symbol: ${args.symbol}
 - Name: ${args.name}
 - Market: ${args.market}
 - Horizon: ${args.horizon}
+- "Now" timestamp: ${new Date().toISOString()}
 ${args.notes ? `- User notes: ${args.notes}` : ""}
 
 LIVE QUOTE
 ${quoteBlock}
+
+TECHNICAL INDICATORS (daily, last 1y)
+${indicatorsBlock(indicators)}
+
+INTRADAY ACTION (today, 5m bars)
+${intradayBlock(intraCandles)}
 
 EARNINGS CONTEXT
 ${earningsBlock(earnings)}
@@ -628,7 +684,7 @@ RECENT HEADLINES
 ${headlineBlock}
 
 TASK
-1. Weigh the headlines, the quote, AND the earnings record (especially the most recent Q1 print and any upcoming earnings date) to decide a directional bias for the given horizon.
+1. Weigh the headlines, the live quote, the TECHNICALS (trend vs SMA20/50, RSI extremes, 52w position, realized volatility), the INTRADAY momentum, AND the earnings record (especially the most recent Q1 print and any upcoming earnings date) to decide a directional bias for the given horizon.
 2. Translate that into an options trade signal:
    - BUY_CALL when bias is bullish with enough conviction
    - BUY_PUT when bias is bearish with enough conviction
@@ -687,8 +743,8 @@ Rules:
       model: MODEL,
       contents: [{ role: "user", parts: [{ text: prompt }] }],
       config: {
-        temperature: 0.3,
-        maxOutputTokens: 3072,
+        temperature: 0.15,
+        maxOutputTokens: 6144,
         responseMimeType: "application/json",
       },
     });
