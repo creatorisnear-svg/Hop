@@ -48,6 +48,11 @@ export interface IndicatorsResult {
   relVolume: number | null;
   vwap: number | null;
   priceVsVwapPct: number | null;
+  // Intraday momentum — used by 1h / 4h / 0DTE scalp predictions. The daily
+  // RSI lags too much for short-term options trades; these read live momentum
+  // off today's 5-min bars.
+  intraRsi5m: number | null;        // RSI14 computed off 5m closes
+  intraTrend5m: number | null;      // net % move over the last ~12 bars (1h)
   // Weekly timeframe — used to confirm the daily signal. When daily and
   // weekly agree the call is much higher conviction.
   weeklySma20: number | null;
@@ -219,26 +224,201 @@ function parseRssItems(xml: string): NewsHeadline[] {
   return out;
 }
 
-export async function fetchHeadlines(query: string): Promise<NewsHeadline[]> {
-  const url = `https://news.google.com/rss/search?q=${encodeURIComponent(
-    query,
-  )}&hl=en-US&gl=US&ceid=US:en`;
+// Internal: fetch one RSS feed and parse it. Used by the multi-source headline
+// aggregator. Returns [] on any failure (the aggregator can still succeed with
+// partial sources).
+async function fetchRssFeed(url: string, label: string): Promise<NewsHeadline[]> {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 10_000);
+  const t = setTimeout(() => ctrl.abort(), 8_000);
   try {
     const res = await fetch(url, {
       signal: ctrl.signal,
       headers: { "user-agent": "Mozilla/5.0 NeuroLinkedBrain/1.0" },
     });
     if (!res.ok) {
-      logger.warn({ status: res.status, query }, "headline fetch failed");
+      logger.warn({ status: res.status, source: label }, "rss feed fetch failed");
       return [];
     }
-    const xml = await res.text();
-    return parseRssItems(xml).slice(0, HEADLINE_LIMIT);
+    return parseRssItems(await res.text());
   } catch (err) {
-    logger.warn({ err, query }, "headline fetch error");
+    logger.warn({ err, source: label }, "rss feed fetch error");
     return [];
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// Multi-source news aggregator. Pulls from:
+//   1. Google News (general query)                      — broad market chatter
+//   2. Google News (recency-filtered, last 24h)         — fresh catalysts
+//   3. Yahoo Finance per-ticker RSS                     — market-specific items
+// Then dedupes by title, sorts newest-first, and caps at HEADLINE_LIMIT.
+// More diverse sources = harder for the model to be fooled by a single biased
+// outlet, and the recency filter surfaces same-day catalysts (earnings beats,
+// downgrades, M&A) that move puts/calls within hours.
+export async function fetchHeadlines(query: string, symbol?: string): Promise<NewsHeadline[]> {
+  const sources: Promise<NewsHeadline[]>[] = [
+    fetchRssFeed(
+      `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`,
+      "google-news-general",
+    ),
+    // `when:1d` filter restricts to past 24h — fresh catalysts only.
+    fetchRssFeed(
+      `https://news.google.com/rss/search?q=${encodeURIComponent(query + " when:1d")}&hl=en-US&gl=US&ceid=US:en`,
+      "google-news-24h",
+    ),
+  ];
+  if (symbol) {
+    // Yahoo Finance per-ticker RSS — usually has 10-20 of the most directly
+    // relevant items for the ticker (earnings, analyst notes, SEC filings).
+    sources.push(
+      fetchRssFeed(
+        `https://feeds.finance.yahoo.com/rss/2.0/headline?s=${encodeURIComponent(symbol)}&region=US&lang=en-US`,
+        "yahoo-finance-ticker",
+      ),
+    );
+  }
+  const results = await Promise.all(sources);
+  const seen = new Set<string>();
+  const merged: NewsHeadline[] = [];
+  for (const arr of results) {
+    for (const h of arr) {
+      const key = h.title.toLowerCase().replace(/\s+/g, " ").trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      merged.push(h);
+    }
+  }
+  // Sort newest-first when publishedAt parses; otherwise preserve order.
+  merged.sort((a, b) => {
+    const ta = Date.parse(a.publishedAt || "");
+    const tb = Date.parse(b.publishedAt || "");
+    if (Number.isFinite(ta) && Number.isFinite(tb)) return tb - ta;
+    if (Number.isFinite(tb)) return 1;
+    if (Number.isFinite(ta)) return -1;
+    return 0;
+  });
+  return merged.slice(0, HEADLINE_LIMIT);
+}
+
+// ── BROADER MARKET CONTEXT ────────────────────────────────────────────────
+// "Is this stock moving WITH the market or against it?" is one of the most
+// underrated short-term predictors. A 1% pop in a single name during a -2%
+// SPY day usually fades; the same 1% pop during a +1.5% SPY day usually
+// continues. We fetch both SPY (broad market) and QQQ (tech beta) so the
+// model can place the stock's move in proper context.
+export interface MarketContext {
+  spy?: { price: number; changePct: number } | null;
+  qqq?: { price: number; changePct: number } | null;
+}
+export async function fetchMarketContext(): Promise<MarketContext> {
+  const [spy, qqq] = await Promise.all([
+    fetchYahooQuote("SPY"),
+    fetchYahooQuote("QQQ"),
+  ]);
+  const tag = (q: MarketQuote | null) =>
+    q && q.price != null && q.changePct != null
+      ? { price: q.price, changePct: q.changePct }
+      : null;
+  return { spy: tag(spy), qqq: tag(qqq) };
+}
+
+// ── OPTIONS-MARKET POSITIONING (FREE) ────────────────────────────────────
+// Yahoo's options endpoint exposes the entire option chain for free. We pull
+// the front-month expiry, sum total *open interest* on calls vs puts, and
+// derive a put/call ratio. This is a real-money positioning signal — when
+// puts > 1.0× calls, options traders are net-bearish; when << 0.7×, net-
+// bullish. For day-trading puts/calls this is one of the most directly
+// relevant signals available.
+export interface OptionsPositioning {
+  putCallOI: number | null;        // total put OI / total call OI
+  putCallVolume: number | null;    // today's put volume / today's call volume
+  totalCallOI: number;
+  totalPutOI: number;
+  expiry: string | null;           // ISO date of the expiry analysed
+  ivAtmCall: number | null;        // implied vol of the ATM call (% annualised)
+  ivAtmPut: number | null;         // implied vol of the ATM put
+  ivSkew: number | null;           // (put IV - call IV) percentage points; >0 = puts bid (fear)
+}
+export async function fetchOptionsPositioning(symbol: string): Promise<OptionsPositioning | null> {
+  const url = `https://query1.finance.yahoo.com/v7/finance/options/${encodeURIComponent(symbol)}`;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 8_000);
+  try {
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: { "user-agent": "Mozilla/5.0 NeuroLinkedBrain/1.0" },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      optionChain?: {
+        result?: Array<{
+          quote?: { regularMarketPrice?: number };
+          expirationDates?: number[];
+          options?: Array<{
+            expirationDate?: number;
+            calls?: Array<{
+              strike?: number;
+              openInterest?: number;
+              volume?: number;
+              impliedVolatility?: number;
+            }>;
+            puts?: Array<{
+              strike?: number;
+              openInterest?: number;
+              volume?: number;
+              impliedVolatility?: number;
+            }>;
+          }>;
+        }>;
+      };
+    };
+    const r = data.optionChain?.result?.[0];
+    const o = r?.options?.[0];
+    if (!o || !o.calls || !o.puts) return null;
+    const spot = r?.quote?.regularMarketPrice ?? null;
+    let totalCallOI = 0, totalPutOI = 0;
+    let totalCallVol = 0, totalPutVol = 0;
+    for (const c of o.calls) {
+      totalCallOI += Number(c.openInterest ?? 0) || 0;
+      totalCallVol += Number(c.volume ?? 0) || 0;
+    }
+    for (const p of o.puts) {
+      totalPutOI += Number(p.openInterest ?? 0) || 0;
+      totalPutVol += Number(p.volume ?? 0) || 0;
+    }
+    // ATM call/put = strike closest to spot.
+    let atmCall: { strike: number; iv: number | null } | null = null;
+    let atmPut: { strike: number; iv: number | null } | null = null;
+    if (spot != null) {
+      for (const c of o.calls) {
+        if (typeof c.strike !== "number") continue;
+        if (!atmCall || Math.abs(c.strike - spot) < Math.abs(atmCall.strike - spot)) {
+          atmCall = { strike: c.strike, iv: typeof c.impliedVolatility === "number" ? c.impliedVolatility : null };
+        }
+      }
+      for (const p of o.puts) {
+        if (typeof p.strike !== "number") continue;
+        if (!atmPut || Math.abs(p.strike - spot) < Math.abs(atmPut.strike - spot)) {
+          atmPut = { strike: p.strike, iv: typeof p.impliedVolatility === "number" ? p.impliedVolatility : null };
+        }
+      }
+    }
+    const ivCall = atmCall?.iv != null ? atmCall.iv * 100 : null;
+    const ivPut  = atmPut?.iv  != null ? atmPut.iv  * 100 : null;
+    return {
+      putCallOI: totalCallOI > 0 ? totalPutOI / totalCallOI : null,
+      putCallVolume: totalCallVol > 0 ? totalPutVol / totalCallVol : null,
+      totalCallOI,
+      totalPutOI,
+      expiry: o.expirationDate ? new Date(o.expirationDate * 1000).toISOString().slice(0, 10) : null,
+      ivAtmCall: ivCall,
+      ivAtmPut: ivPut,
+      ivSkew: (ivCall != null && ivPut != null) ? (ivPut - ivCall) : null,
+    };
+  } catch (err) {
+    logger.warn({ err, symbol }, "options positioning fetch error");
+    return null;
   } finally {
     clearTimeout(t);
   }
@@ -777,6 +957,22 @@ function indicatorsBlock(ind: IndicatorsResult | null): string {
       : "weekly neutral";
     lines.push(`Weekly RSI14: ${ind.weeklyRsi14.toFixed(1)} (${wRsiTag})`);
   }
+  // Intraday momentum — critical for 1h / 4h / 0DTE scalps. The daily RSI is
+  // too slow to catch a 30-minute reversal; the 5-min RSI shows it instantly.
+  if (ind.intraRsi5m != null) {
+    const iTag = ind.intraRsi5m >= 75 ? "5m overbought (reversal risk)"
+      : ind.intraRsi5m >= 60 ? "5m strong upward momentum"
+      : ind.intraRsi5m <= 25 ? "5m oversold (bounce risk)"
+      : ind.intraRsi5m <= 40 ? "5m strong downward momentum"
+      : "5m neutral";
+    lines.push(`Intraday RSI14 (5m bars): ${ind.intraRsi5m.toFixed(1)} (${iTag})`);
+  }
+  if (ind.intraTrend5m != null) {
+    const tTag = ind.intraTrend5m >= 0.6 ? "intraday uptrend (last 12 bars net up)"
+      : ind.intraTrend5m <= -0.6 ? "intraday downtrend (last 12 bars net down)"
+      : "intraday choppy";
+    lines.push(`Intraday short-trend (last 1h, 5m bars): ${ind.intraTrend5m >= 0 ? "+" : ""}${(ind.intraTrend5m * 100).toFixed(1)}% net move (${tTag})`);
+  }
   return lines.join("\n");
 }
 
@@ -855,8 +1051,18 @@ export async function predictMarket(args: PredictArgs): Promise<PredictionResult
   // Earnings are only relevant for actual stocks. Skip the API call for crypto,
   // forex and indexes — they'll just say "unavailable" anyway.
   const isStockLike = args.market === "stock" || args.market === "etf";
-  const [headlines, quote, earnings, dailyCandles, intraCandles, weeklyCandles] = await Promise.all([
-    fetchHeadlines(query),
+  const [
+    headlines,
+    quote,
+    earnings,
+    dailyCandles,
+    intraCandles,
+    weeklyCandles,
+    marketCtx,
+    optionsPos,
+  ] = await Promise.all([
+    // Multi-source: Google general + Google 24h-recency + Yahoo per-ticker.
+    fetchHeadlines(query, isStockLike ? args.symbol : undefined),
     fetchYahooQuote(args.symbol),
     isStockLike ? fetchEarnings(args.symbol) : Promise.resolve<EarningsInfo | null>(null),
     fetchYahooCandles(args.symbol, "1d", "1y"),
@@ -864,6 +1070,13 @@ export async function predictMarket(args: PredictArgs): Promise<PredictionResult
     // Weekly bars over 2 years — used to compute the weekly trend timeframe
     // confirmation (weekly SMA20 + weekly RSI14). Failure is non-fatal.
     fetchYahooCandles(args.symbol, "1wk", "2y"),
+    // Broader-market context (SPY/QQQ) — tells the model whether this stock's
+    // move is idiosyncratic or just market beta. Always-on (cheap and small).
+    fetchMarketContext(),
+    // Options chain: put/call OI ratio + ATM IV skew. Stock-like only.
+    isStockLike
+      ? fetchOptionsPositioning(args.symbol)
+      : Promise.resolve<OptionsPositioning | null>(null),
   ]);
 
   const indicators = dailyCandles
@@ -878,9 +1091,22 @@ export async function predictMarket(args: PredictArgs): Promise<PredictionResult
       )
     : null;
 
+  // Tag each headline with how fresh it is — "(2h ago)" / "(1d ago)" — so the
+  // model can weight same-day catalysts higher than week-old chatter.
+  const nowTs = Date.now();
+  const ageTag = (publishedAt: string): string => {
+    const t = Date.parse(publishedAt);
+    if (!Number.isFinite(t)) return "";
+    const mins = Math.max(0, Math.round((nowTs - t) / 60_000));
+    if (mins < 60) return ` (${mins}m ago)`;
+    const hrs = Math.round(mins / 60);
+    if (hrs < 36) return ` (${hrs}h ago)`;
+    const days = Math.round(hrs / 24);
+    return ` (${days}d ago)`;
+  };
   const headlineBlock = headlines.length
     ? headlines
-        .map((h, i) => `[${i + 1}] ${h.title}${h.source ? ` (${h.source})` : ""}`)
+        .map((h, i) => `[${i + 1}]${ageTag(h.publishedAt)} ${h.title}${h.source ? ` — ${h.source}` : ""}`)
         .join("\n")
     : "(no recent headlines fetched)";
 
@@ -891,6 +1117,58 @@ export async function predictMarket(args: PredictArgs): Promise<PredictionResult
         quote.marketState ?? "n/a"
       }`
     : "(no live quote available)";
+
+  // Broader-market context block. Computes "relative strength" (this stock vs
+  // SPY/QQQ today) which is one of the cleanest day-trade signals: a stock
+  // ripping +2% on a flat SPY day is FAR more bullish than +2% on a +2% SPY.
+  const marketBlock = (() => {
+    const lines: string[] = [];
+    if (marketCtx.spy) lines.push(`SPY (S&P 500): ${marketCtx.spy.price.toFixed(2)} (${marketCtx.spy.changePct >= 0 ? "+" : ""}${marketCtx.spy.changePct.toFixed(2)}% today)`);
+    if (marketCtx.qqq) lines.push(`QQQ (Nasdaq-100): ${marketCtx.qqq.price.toFixed(2)} (${marketCtx.qqq.changePct >= 0 ? "+" : ""}${marketCtx.qqq.changePct.toFixed(2)}% today)`);
+    if (quote?.changePct != null && marketCtx.spy?.changePct != null) {
+      const rs = quote.changePct - marketCtx.spy.changePct;
+      const tag = rs > 0.5 ? "OUTPERFORMING SPY (relative strength)"
+        : rs < -0.5 ? "UNDERPERFORMING SPY (relative weakness)"
+        : "moving with SPY (no edge)";
+      lines.push(`Relative strength vs SPY today: ${rs >= 0 ? "+" : ""}${rs.toFixed(2)}pp (${tag})`);
+    }
+    return lines.length ? lines.join("\n") : "(market context unavailable)";
+  })();
+
+  // Options-market positioning block. The put/call OI ratio is real-money
+  // sentiment among options traders. Big skew between ATM put-IV and call-IV
+  // shows what side is being bid for protection.
+  const optionsBlock = (() => {
+    if (!optionsPos) return "(options chain unavailable)";
+    const lines: string[] = [];
+    if (optionsPos.expiry) lines.push(`Front-month expiry analysed: ${optionsPos.expiry}`);
+    if (optionsPos.putCallOI != null) {
+      const tag = optionsPos.putCallOI >= 1.2 ? "BEARISH (puts > 1.2× calls)"
+        : optionsPos.putCallOI >= 0.9 ? "neutral-bearish"
+        : optionsPos.putCallOI >= 0.65 ? "neutral-bullish"
+        : "BULLISH (calls dominate)";
+      lines.push(`Put/Call open interest: ${optionsPos.putCallOI.toFixed(2)} (${tag})`);
+    }
+    if (optionsPos.putCallVolume != null) {
+      const tag = optionsPos.putCallVolume >= 1.2 ? "today's flow is BEARISH"
+        : optionsPos.putCallVolume >= 0.9 ? "today's flow is balanced/bearish-leaning"
+        : optionsPos.putCallVolume >= 0.65 ? "today's flow is balanced/bullish-leaning"
+        : "today's flow is BULLISH";
+      lines.push(`Put/Call volume (today): ${optionsPos.putCallVolume.toFixed(2)} (${tag})`);
+    }
+    if (optionsPos.ivAtmCall != null && optionsPos.ivAtmPut != null) {
+      lines.push(`ATM IV — call: ${optionsPos.ivAtmCall.toFixed(1)}% · put: ${optionsPos.ivAtmPut.toFixed(1)}%`);
+    }
+    if (optionsPos.ivSkew != null) {
+      const tag = optionsPos.ivSkew >= 3 ? "DOWNSIDE FEAR (puts paid up)"
+        : optionsPos.ivSkew >= 1 ? "mild downside hedging"
+        : optionsPos.ivSkew >= -1 ? "balanced"
+        : optionsPos.ivSkew >= -3 ? "upside chase"
+        : "GREED (calls paid up)";
+      lines.push(`IV skew (put-IV − call-IV): ${optionsPos.ivSkew >= 0 ? "+" : ""}${optionsPos.ivSkew.toFixed(1)}pp (${tag})`);
+    }
+    return lines.length ? lines.join("\n") : "(options chain returned no rows)";
+  })();
 
   const prompt = `You are a quantitative market analyst inside the NeuroLinked Brain. Produce a probabilistic forecast AND an options trade signal for the asset below. Ground EVERY claim in the data shown — no speculation.
 
@@ -905,7 +1183,13 @@ ${args.notes ? `- User notes: ${args.notes}` : ""}
 LIVE QUOTE
 ${quoteBlock}
 
-TECHNICAL INDICATORS (daily, last 1y)
+BROADER MARKET TODAY (use this to judge if the move is idiosyncratic vs market beta)
+${marketBlock}
+
+OPTIONS-MARKET POSITIONING (real-money sentiment from the option chain)
+${optionsBlock}
+
+TECHNICAL INDICATORS (daily, last 1y — includes intraday RSI for scalping)
 ${indicatorsBlock(indicators)}
 
 INTRADAY ACTION (today, 5m bars)
@@ -914,7 +1198,7 @@ ${intradayBlock(intraCandles)}
 EARNINGS CONTEXT
 ${earningsBlock(earnings)}
 
-RECENT HEADLINES
+RECENT HEADLINES (newest first; freshness in parens)
 ${headlineBlock}
 
 YOUR TRACK RECORD ON THIS WATCH (self-calibration — adjust your confidence accordingly)
@@ -1399,7 +1683,7 @@ export async function chatAboutMarket(
   const isStockLike = ctx.market === "stock" || ctx.market === "etf";
   const query = `${ctx.name} ${ctx.symbol} stock market news`;
   const [headlines, quote, earnings] = await Promise.all([
-    fetchHeadlines(query),
+    fetchHeadlines(query, isStockLike ? ctx.symbol : undefined),
     fetchYahooQuote(ctx.symbol),
     isStockLike ? fetchEarnings(ctx.symbol) : Promise.resolve<EarningsInfo | null>(null),
   ]);
@@ -1714,6 +1998,28 @@ export function computeIndicators(
     else weeklyTrendTag = "weekly choppy";
   }
 
+  // ── Intraday momentum (5-min RSI + last-hour net move) ──────────────────
+  // Critical for short-dated options scalps. Uses today's 5m close series.
+  let intraRsi5m: number | null = null;
+  let intraTrend5m: number | null = null;
+  if (opts.intradayCandles && opts.intradayCandles.length >= 15) {
+    const closes = opts.intradayCandles.map((k) => k.c);
+    // RSI14 on 5m closes
+    let g = 0, l = 0;
+    for (let i = closes.length - 14; i < closes.length; i++) {
+      const d = closes[i] - closes[i - 1];
+      if (d >= 0) g += d; else l -= d;
+    }
+    const ag = g / 14, al = l / 14;
+    intraRsi5m = al === 0 ? 100 : 100 - 100 / (1 + ag / al);
+    // Net % move over the last 12 bars (~1h of 5m bars).
+    if (closes.length >= 13) {
+      const past = closes[closes.length - 13];
+      const now = closes[closes.length - 1];
+      if (past) intraTrend5m = (now - past) / past;
+    }
+  }
+
   return {
     symbol,
     price: last,
@@ -1743,6 +2049,8 @@ export function computeIndicators(
     priceVsWeeklySma20Pct,
     weeklyRsi14,
     weeklyTrendTag,
+    intraRsi5m,
+    intraTrend5m,
     asOf: new Date().toISOString(),
   };
 }
