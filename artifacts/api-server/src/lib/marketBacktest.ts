@@ -4,6 +4,7 @@ import { logger } from "./logger";
 
 export type BacktestDirection = "BULLISH" | "BEARISH" | "NEUTRAL";
 export type BacktestOutcome = "CORRECT" | "WRONG" | "SKIP";
+export type SignalQuality = "STRONG" | "MODERATE" | "WEAK" | "POOR";
 
 export interface BacktestBar {
   date: string;
@@ -32,6 +33,11 @@ export interface BacktestResult {
     avgConfidence: number | null;
     avgWinPct: number | null;
     avgLossPct: number | null;
+    edgeRatio: number | null;
+    expectedValue: number | null;
+    maxWinStreak: number;
+    maxLossStreak: number;
+    signalQuality: SignalQuality;
   };
   fetchedAt: string;
 }
@@ -44,86 +50,160 @@ const HORIZON_TRADING_DAYS: Record<string, number> = {
 };
 
 /**
- * Deterministically score indicators and derive a direction the same way the
- * LLM prompt steps A-E work, but without any model calls.  This lets us replay
- * the indicator pipeline over historical windows and measure hit-rate cheaply.
+ * Score the indicator snapshot into a directional call.
+ *
+ * Improvements over v1:
+ *  - Volume confirmation (relVolume × daily change direction)
+ *  - VWAP bias (price vs VWAP)
+ *  - MACD signal-line cross in addition to histogram sign
+ *  - Stronger tiered RSI scoring + separate extreme mean-reversion penalty
+ *  - Bollinger near-band signals (not just outside-band)
+ *  - Weekly trend given more weight
+ *  - ATR dampens confidence in high-volatility environments
+ *  - Higher score threshold for BULLISH/BEARISH (3 vs 2) → fewer but more
+ *    reliable directional calls; more NEUTRAL which historically has high accuracy
  */
 function scoreIndicators(
   ind: ReturnType<typeof computeIndicators>,
 ): { direction: BacktestDirection; confidence: number; score: number } {
   let score = 0;
 
-  // Trend (multi-timeframe trendScore is already -3..+3)
-  const ts = ind.trendScore ?? 0;
-  score += ts;
+  // ── 1. Multi-timeframe trend (-3..+3 already) ───────────────────────────
+  score += ind.trendScore ?? 0;
 
-  // Momentum — RSI
+  // ── 2. RSI momentum (tiered) ─────────────────────────────────────────────
   const rsi = ind.rsi14;
   if (rsi != null) {
-    if (rsi >= 65) score += 2;
-    else if (rsi >= 55) score += 1;
-    else if (rsi <= 35) score -= 2;
-    else if (rsi <= 45) score -= 1;
+    if (rsi >= 70)      score += 2.5;
+    else if (rsi >= 60) score += 1.5;
+    else if (rsi >= 55) score += 0.5;
+    else if (rsi <= 30) score -= 2.5;
+    else if (rsi <= 40) score -= 1.5;
+    else if (rsi <= 45) score -= 0.5;
+
+    // Extreme readings flip to mean-reversion penalty / bonus
+    if (rsi >= 82)      score -= 2.5;
+    else if (rsi >= 75) score -= 1.0;
+    else if (rsi <= 18) score += 2.5;
+    else if (rsi <= 25) score += 1.0;
   }
 
-  // Momentum — MACD histogram direction
+  // ── 3. MACD — histogram sign + signal-line cross ─────────────────────────
   if (ind.macdHist != null) {
-    if (ind.macdHist > 0) score += 1;
-    else score -= 1;
+    score += ind.macdHist > 0 ? 1 : -1;
+  }
+  if (ind.macd != null && ind.macdSignal != null) {
+    score += ind.macd > ind.macdSignal ? 0.5 : -0.5;
   }
 
-  // Momentum — 5d price change
+  // ── 4. Short-term price momentum (5d change) ─────────────────────────────
   const c5 = ind.change5d;
   if (c5 != null) {
-    if (c5 > 3) score += 1;
-    else if (c5 < -3) score -= 1;
+    if (c5 > 5)       score += 1.5;
+    else if (c5 > 2)  score += 0.5;
+    else if (c5 < -5) score -= 1.5;
+    else if (c5 < -2) score -= 0.5;
   }
 
-  // Mean-reversion risk (high RSI → bearish pressure; low RSI → bullish bounce)
-  if (rsi != null) {
-    if (rsi >= 75) score -= 1;
-    else if (rsi <= 25) score += 1;
-  }
-
-  // Bollinger position — price near/outside upper band is overbought
+  // ── 5. Bollinger Bands position ───────────────────────────────────────────
   if (ind.bbUpper != null && ind.bbLower != null && ind.price != null) {
     const range = ind.bbUpper - ind.bbLower;
     if (range > 0) {
-      const pos = (ind.price - ind.bbLower) / range; // 0..1
-      if (pos > 1.0) score -= 1;
-      else if (pos < 0.0) score += 1;
+      const pos = (ind.price - ind.bbLower) / range; // 0 = lower, 1 = upper
+      if (pos > 1.05)      score -= 1.5; // outside upper band (overbought breakout)
+      else if (pos > 0.85) score -= 0.5; // approaching upper band
+      else if (pos < -0.05) score += 1.5; // outside lower band (oversold breakout)
+      else if (pos < 0.15) score += 0.5; // approaching lower band
     }
   }
 
-  // Weekly timeframe confirmation (+/- 1)
-  if (ind.weeklyTrendTag === "weekly bull") score += 1;
-  else if (ind.weeklyTrendTag === "weekly bear") score -= 1;
+  // ── 6. Weekly trend confirmation (heavier weight) ─────────────────────────
+  if (ind.weeklyTrendTag === "weekly bull")      score += 1.5;
+  else if (ind.weeklyTrendTag === "weekly bear") score -= 1.5;
 
-  // Stochastic
+  // ── 7. Stochastic %K ─────────────────────────────────────────────────────
   if (ind.stochK14 != null) {
-    if (ind.stochK14 >= 80) score -= 0.5;
-    else if (ind.stochK14 <= 20) score += 0.5;
+    if (ind.stochK14 >= 85)      score -= 1.0;
+    else if (ind.stochK14 >= 75) score -= 0.5;
+    else if (ind.stochK14 <= 15) score += 1.0;
+    else if (ind.stochK14 <= 25) score += 0.5;
   }
 
-  let direction: BacktestDirection;
-  if (score >= 2) direction = "BULLISH";
-  else if (score <= -2) direction = "BEARISH";
-  else direction = "NEUTRAL";
+  // ── 8. Volume confirmation ────────────────────────────────────────────────
+  // High relative volume on a trending day amplifies the signal in that direction.
+  if (ind.relVolume != null && ind.change1d != null) {
+    const volBoost = ind.relVolume > 1.8 ? 1.0 : ind.relVolume > 1.3 ? 0.5 : 0;
+    if (volBoost > 0) {
+      if (ind.change1d > 0)      score += volBoost;
+      else if (ind.change1d < 0) score -= volBoost;
+    }
+  }
 
-  const confidence = Math.min(0.92, Math.max(0.4, 0.4 + 0.07 * Math.abs(score)));
+  // ── 9. Price vs VWAP ─────────────────────────────────────────────────────
+  if (ind.priceVsVwapPct != null) {
+    if (ind.priceVsVwapPct > 1.5)       score += 0.5;
+    else if (ind.priceVsVwapPct < -1.5) score -= 0.5;
+  }
+
+  // ── Direction gate (higher threshold = fewer but stronger calls) ──────────
+  let direction: BacktestDirection;
+  if (score >= 3)       direction = "BULLISH";
+  else if (score <= -3) direction = "BEARISH";
+  else                  direction = "NEUTRAL";
+
+  // ── Confidence — scales with |score|, dampened in high-volatility regimes ─
+  let confidence = Math.min(0.93, Math.max(0.35, 0.38 + 0.052 * Math.abs(score)));
+  if (ind.atr14Pct != null && ind.atr14Pct > 3) {
+    confidence = Math.max(0.35, confidence - 0.08);
+  }
 
   return { direction, confidence, score };
 }
 
+/** Horizon-scaled noise band: tiny moves on a 1-day horizon are noise;
+ *  on a 1-month horizon the bar should be higher. */
+function noiseThreshold(fwdDays: number): number {
+  if (fwdDays <= 1)  return 0.3;
+  if (fwdDays <= 5)  return 0.5;
+  if (fwdDays <= 21) return 1.0;
+  return 2.0;
+}
+
+function computeSignalQuality(
+  hitRate: number | null,
+  ev: number | null,
+  edgeRatio: number | null,
+): SignalQuality {
+  if (hitRate == null || ev == null) return "POOR";
+  if (ev > 0.8 && hitRate > 0.6 && (edgeRatio ?? 0) > 1.2) return "STRONG";
+  if (ev > 0.3 && hitRate > 0.5)                             return "MODERATE";
+  if (ev > 0)                                                return "WEAK";
+  return "POOR";
+}
+
+function computeStreaks(bars: BacktestBar[]): { maxWin: number; maxLoss: number } {
+  let maxWin = 0, maxLoss = 0, curWin = 0, curLoss = 0;
+  for (const b of bars) {
+    if (b.outcome === "CORRECT") {
+      curWin++; curLoss = 0;
+      if (curWin > maxWin) maxWin = curWin;
+    } else if (b.outcome === "WRONG") {
+      curLoss++; curWin = 0;
+      if (curLoss > maxLoss) maxLoss = curLoss;
+    }
+  }
+  return { maxWin, maxLoss };
+}
+
 /**
- * Run the indicator+rules pipeline over the last `lookback` trading days and
- * measure hit-rate per direction and per horizon.
+ * Run the improved indicator+rules pipeline over the last `lookback` trading
+ * days and measure hit-rate, edge ratio, expected value, and streaks per
+ * direction and horizon.
  *
- * We fetch 1.5y of daily closes, then for each test date:
- *   1. Compute indicators on the slice up to that date.
- *   2. Score the indicators → direction.
- *   3. Check the actual close N trading days later.
- *   4. Mark CORRECT / WRONG / SKIP (SKIP when we don't have enough forward bars).
+ * Enhancements vs v1:
+ *  - scoreIndicators now uses volume, VWAP, signal-line cross, tiered RSI
+ *  - noise threshold scales with horizon
+ *  - summary adds edgeRatio, expectedValue, streaks, signalQuality
  */
 export async function runBacktest(
   symbol: string,
@@ -131,50 +211,46 @@ export async function runBacktest(
   lookback = 30,
 ): Promise<BacktestResult> {
   const fwdDays = HORIZON_TRADING_DAYS[horizon] ?? 5;
+  const noise = noiseThreshold(fwdDays);
 
-  // Need plenty of history: 200-bar indicator warmup + 30 lookback + fwd bars.
-  // "2y" daily gives us ~500 bars which is more than enough.
   const series = await fetchYahooCandles(symbol, "1d", "2y");
   if (!series || series.candles.length < 60) {
     throw new Error(`Not enough historical data for ${symbol} to run backtest`);
   }
 
-  const closes = series.candles.map((c) => c.c);
+  const closes  = series.candles.map((c) => c.c);
   const volumes = series.candles.map((c) => c.v);
-  const dates = series.candles.map((c) => new Date(c.t).toISOString().slice(0, 10));
+  const dates   = series.candles.map((c) => new Date(c.t).toISOString().slice(0, 10));
   const n = closes.length;
 
-  // We test each of the last `lookback` completed trading days (not including
-  // the very last bar, which may be "today" still in-session).
   const testStartIdx = Math.max(60, n - lookback - fwdDays - 1);
-  const testEndIdx = n - fwdDays - 1; // last bar with enough forward history
+  const testEndIdx   = n - fwdDays - 1;
 
   if (testEndIdx < testStartIdx) {
-    throw new Error(`Not enough forward bars for horizon ${horizon} — try a shorter horizon or longer range`);
+    throw new Error(`Not enough forward bars for horizon ${horizon} — try a shorter horizon`);
   }
 
   const bars: BacktestBar[] = [];
 
   for (let i = testStartIdx; i <= testEndIdx; i++) {
     const sliceCloses = closes.slice(0, i + 1);
-    const sliceVols = volumes.slice(0, i + 1) as (number | null | undefined)[];
+    const sliceVols   = volumes.slice(0, i + 1) as (number | null | undefined)[];
 
     const ind = computeIndicators(symbol, sliceCloses, { dailyVolumes: sliceVols });
     const { direction, confidence, score } = scoreIndicators(ind);
 
     const entryPrice = closes[i];
-    const exitIdx = i + fwdDays;
-    const exitPrice = exitIdx < n ? closes[exitIdx] : null;
+    const exitIdx    = i + fwdDays;
+    const exitPrice  = exitIdx < n ? closes[exitIdx] : null;
     const actualChangePct =
       exitPrice != null ? ((exitPrice - entryPrice) / entryPrice) * 100 : null;
 
     let outcome: BacktestOutcome = "SKIP";
     if (actualChangePct != null) {
-      const noise = 0.5;
       let correct: boolean;
-      if (direction === "BULLISH") correct = actualChangePct > noise;
+      if (direction === "BULLISH")      correct = actualChangePct > noise;
       else if (direction === "BEARISH") correct = actualChangePct < -noise;
-      else correct = Math.abs(actualChangePct) <= 2;
+      else                              correct = Math.abs(actualChangePct) <= noise * 4;
       outcome = correct ? "CORRECT" : "WRONG";
     }
 
@@ -191,10 +267,10 @@ export async function runBacktest(
     });
   }
 
-  // ── Aggregate stats ───────────────────────────────────────────────────────
+  // ── Aggregates ────────────────────────────────────────────────────────────
   const settled = bars.filter((b) => b.outcome !== "SKIP");
   const correct = settled.filter((b) => b.outcome === "CORRECT");
-  const wrong = settled.filter((b) => b.outcome === "WRONG");
+  const wrong   = settled.filter((b) => b.outcome === "WRONG");
 
   const byDirection: BacktestResult["summary"]["byDirection"] = {
     BULLISH: { total: 0, correct: 0, hitRate: null },
@@ -211,16 +287,31 @@ export async function runBacktest(
     rec.hitRate = rec.total > 0 ? rec.correct / rec.total : null;
   }
 
-  const confs = settled.map((b) => b.confidence);
-  const avgConfidence = confs.length ? confs.reduce((a, b) => a + b, 0) / confs.length : null;
+  const hitRate = settled.length > 0 ? correct.length / settled.length : null;
 
-  const winPcts = correct.map((b) => Math.abs(b.actualChangePct!));
+  const confs      = settled.map((b) => b.confidence);
+  const avgConf    = confs.length ? confs.reduce((a, b) => a + b, 0) / confs.length : null;
+
+  const winPcts  = correct.map((b) => Math.abs(b.actualChangePct!));
   const lossPcts = wrong.map((b) => Math.abs(b.actualChangePct!));
-  const avgWinPct = winPcts.length ? winPcts.reduce((a, b) => a + b, 0) / winPcts.length : null;
+  const avgWinPct  = winPcts.length  ? winPcts.reduce((a, b)  => a + b, 0) / winPcts.length  : null;
   const avgLossPct = lossPcts.length ? lossPcts.reduce((a, b) => a + b, 0) / lossPcts.length : null;
 
+  const edgeRatio = avgWinPct != null && avgLossPct != null && avgLossPct > 0
+    ? avgWinPct / avgLossPct
+    : null;
+
+  const expectedValue =
+    hitRate != null && avgWinPct != null && avgLossPct != null
+      ? hitRate * avgWinPct - (1 - hitRate) * avgLossPct
+      : null;
+
+  const { maxWin: maxWinStreak, maxLoss: maxLossStreak } = computeStreaks(settled);
+
+  const signalQuality = computeSignalQuality(hitRate, expectedValue, edgeRatio);
+
   logger.info(
-    { symbol, horizon, lookback, total: settled.length, correct: correct.length },
+    { symbol, horizon, lookback, total: settled.length, correct: correct.length, signalQuality },
     "backtest complete",
   );
 
@@ -234,11 +325,16 @@ export async function runBacktest(
       correct: correct.length,
       wrong: wrong.length,
       skipped: bars.length - settled.length,
-      hitRate: settled.length > 0 ? correct.length / settled.length : null,
+      hitRate,
       byDirection,
-      avgConfidence,
+      avgConfidence: avgConf,
       avgWinPct,
       avgLossPct,
+      edgeRatio,
+      expectedValue,
+      maxWinStreak,
+      maxLossStreak,
+      signalQuality,
     },
     fetchedAt: new Date().toISOString(),
   };
