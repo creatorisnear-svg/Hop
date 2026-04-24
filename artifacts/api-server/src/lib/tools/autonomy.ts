@@ -8,6 +8,15 @@ import {
 } from "../jarvisAutonomy";
 import { logger } from "../logger";
 
+const ACCOUNT_PROP = {
+  account: {
+    type: "integer",
+    enum: [1, 2],
+    default: 1,
+    description: "Which configured account to use: 1 (default, GITHUB_TOKEN/KOYEB_API_TOKEN) or 2 (GITHUB_TOKEN_2/KOYEB_API_TOKEN_2). Falls back to 1 if 2 is not configured.",
+  },
+} as const;
+
 /**
  * Wrap a tool's run() so every invocation:
  *   1. Checks the JARVIS_AUTONOMY kill switch
@@ -52,14 +61,17 @@ export function registerAutonomyTools(): void {
   registerTool(
     autonomous({
       name: "github_list_commits",
-      description: "List the most recent commits on the configured repo branch.",
+      description: "List the most recent commits on a configured repo branch.",
       paramsSchema: {
         type: "object",
-        properties: { limit: { type: "integer", default: 10, minimum: 1, maximum: 50 } },
+        properties: {
+          limit: { type: "integer", default: 10, minimum: 1, maximum: 50 },
+          ...ACCOUNT_PROP,
+        },
       },
       async run(params: unknown) {
-        const { limit = 10 } = (params as { limit?: number }) ?? {};
-        return github.listCommits(limit);
+        const { limit = 10, account } = (params as { limit?: number; account?: number }) ?? {};
+        return github.listCommits(limit, account);
       },
     }),
   );
@@ -67,18 +79,19 @@ export function registerAutonomyTools(): void {
   registerTool(
     autonomous({
       name: "github_read_file",
-      description: "Read a file's contents from the configured repo.",
+      description: "Read a file's contents from a configured repo.",
       paramsSchema: {
         type: "object",
         required: ["path"],
         properties: {
           path: { type: "string", description: "Repo-relative file path" },
           ref: { type: "string", description: "Branch, tag, or commit SHA (optional)" },
+          ...ACCOUNT_PROP,
         },
       },
       async run(params: unknown) {
-        const { path, ref } = params as { path: string; ref?: string };
-        return github.readFile(path, ref);
+        const { path, ref, account } = params as { path: string; ref?: string; account?: number };
+        return github.readFile(path, ref, account);
       },
     }),
   );
@@ -87,7 +100,7 @@ export function registerAutonomyTools(): void {
     autonomous({
       name: "github_write_file",
       description:
-        "Create or update a file in the configured repo. Commits directly to the given branch (defaults to main).",
+        "Create or update a file in a configured repo. Commits directly to the given branch (defaults to main).",
       paramsSchema: {
         type: "object",
         required: ["path", "content", "message"],
@@ -96,13 +109,14 @@ export function registerAutonomyTools(): void {
           content: { type: "string" },
           message: { type: "string", description: "Commit message" },
           branch: { type: "string", description: "Target branch (default: main)" },
+          ...ACCOUNT_PROP,
         },
       },
       async run(params: unknown) {
-        const { path, content, message, branch } = params as {
-          path: string; content: string; message: string; branch?: string;
+        const { path, content, message, branch, account } = params as {
+          path: string; content: string; message: string; branch?: string; account?: number;
         };
-        return github.writeFile(path, content, message, branch);
+        return github.writeFile(path, content, message, branch, account);
       },
     }),
   );
@@ -117,11 +131,12 @@ export function registerAutonomyTools(): void {
         properties: {
           name: { type: "string", description: "New branch name" },
           from: { type: "string", description: "Source branch (default: main)" },
+          ...ACCOUNT_PROP,
         },
       },
       async run(params: unknown) {
-        const { name, from } = params as { name: string; from?: string };
-        return github.createBranch(name, from);
+        const { name, from, account } = params as { name: string; from?: string; account?: number };
+        return github.createBranch(name, from, account);
       },
     }),
   );
@@ -138,13 +153,14 @@ export function registerAutonomyTools(): void {
           body: { type: "string" },
           head: { type: "string", description: "Source branch" },
           base: { type: "string", description: "Target branch (default: main)" },
+          ...ACCOUNT_PROP,
         },
       },
       async run(params: unknown) {
-        const { title, body = "", head, base } = params as {
-          title: string; body?: string; head: string; base?: string;
+        const { title, body = "", head, base, account } = params as {
+          title: string; body?: string; head: string; base?: string; account?: number;
         };
-        return github.openPR(title, body, head, base);
+        return github.openPR(title, body, head, base, account);
       },
     }),
   );
@@ -159,13 +175,14 @@ export function registerAutonomyTools(): void {
         properties: {
           number: { type: "integer" },
           method: { type: "string", enum: ["merge", "squash", "rebase"], default: "squash" },
+          ...ACCOUNT_PROP,
         },
       },
       async run(params: unknown) {
-        const { number, method = "squash" } = params as {
-          number: number; method?: "merge" | "squash" | "rebase";
+        const { number, method = "squash", account } = params as {
+          number: number; method?: "merge" | "squash" | "rebase"; account?: number;
         };
-        return github.mergePR(number, method);
+        return github.mergePR(number, method, account);
       },
     }),
   );
@@ -174,10 +191,27 @@ export function registerAutonomyTools(): void {
   registerTool(
     autonomous({
       name: "koyeb_list_services",
-      description: "List all Koyeb services for the configured token.",
-      paramsSchema: { type: "object", properties: {} },
-      async run() {
-        return koyeb.listServices();
+      description: "List Koyeb services for a configured token. Pass account: 'all' to combine both accounts.",
+      paramsSchema: {
+        type: "object",
+        properties: {
+          account: {
+            oneOf: [
+              { type: "integer", enum: [1, 2], default: 1 },
+              { type: "string", enum: ["all"] },
+            ],
+            description: "1, 2, or 'all' to merge both accounts.",
+          },
+        },
+      },
+      async run(params: unknown) {
+        const { account } = (params as { account?: number | "all" }) ?? {};
+        if (account === "all") {
+          const accs = koyeb.whichAccounts();
+          const all = await Promise.all(accs.map((a) => koyeb.listServices(a)));
+          return all.flat();
+        }
+        return koyeb.listServices(typeof account === "number" ? account : 1);
       },
     }),
   );
@@ -192,11 +226,12 @@ export function registerAutonomyTools(): void {
         properties: {
           serviceId: { type: "string" },
           limit: { type: "integer", default: 100, minimum: 1, maximum: 500 },
+          ...ACCOUNT_PROP,
         },
       },
       async run(params: unknown) {
-        const { serviceId, limit = 100 } = params as { serviceId: string; limit?: number };
-        return koyeb.getRecentLogs(serviceId, limit);
+        const { serviceId, limit = 100, account } = params as { serviceId: string; limit?: number; account?: number };
+        return koyeb.getRecentLogs(serviceId, limit, account);
       },
     }),
   );
@@ -208,11 +243,11 @@ export function registerAutonomyTools(): void {
       paramsSchema: {
         type: "object",
         required: ["serviceId"],
-        properties: { serviceId: { type: "string" } },
+        properties: { serviceId: { type: "string" }, ...ACCOUNT_PROP },
       },
       async run(params: unknown) {
-        const { serviceId } = params as { serviceId: string };
-        return koyeb.redeploy(serviceId);
+        const { serviceId, account } = params as { serviceId: string; account?: number };
+        return koyeb.redeploy(serviceId, account);
       },
     }),
   );
@@ -224,11 +259,11 @@ export function registerAutonomyTools(): void {
       paramsSchema: {
         type: "object",
         required: ["serviceId"],
-        properties: { serviceId: { type: "string" } },
+        properties: { serviceId: { type: "string" }, ...ACCOUNT_PROP },
       },
       async run(params: unknown) {
-        const { serviceId } = params as { serviceId: string };
-        return koyeb.pause(serviceId);
+        const { serviceId, account } = params as { serviceId: string; account?: number };
+        return koyeb.pause(serviceId, account);
       },
     }),
   );
@@ -240,11 +275,11 @@ export function registerAutonomyTools(): void {
       paramsSchema: {
         type: "object",
         required: ["serviceId"],
-        properties: { serviceId: { type: "string" } },
+        properties: { serviceId: { type: "string" }, ...ACCOUNT_PROP },
       },
       async run(params: unknown) {
-        const { serviceId } = params as { serviceId: string };
-        return koyeb.resume(serviceId);
+        const { serviceId, account } = params as { serviceId: string; account?: number };
+        return koyeb.resume(serviceId, account);
       },
     }),
   );
@@ -256,17 +291,21 @@ export function registerAutonomyTools(): void {
       paramsSchema: {
         type: "object",
         required: ["serviceId"],
-        properties: { serviceId: { type: "string" } },
+        properties: { serviceId: { type: "string" }, ...ACCOUNT_PROP },
       },
       async run(params: unknown) {
-        const { serviceId } = params as { serviceId: string };
-        return koyeb.deleteService(serviceId);
+        const { serviceId, account } = params as { serviceId: string; account?: number };
+        return koyeb.deleteService(serviceId, account);
       },
     }),
   );
 
   logger.info(
-    { autonomy: autonomyEnabled() ? "on" : "off" },
+    {
+      autonomy: autonomyEnabled() ? "on" : "off",
+      githubAccounts: github.whichAccounts(),
+      koyebAccounts: koyeb.whichAccounts(),
+    },
     "Jarvis autonomy tools registered (GitHub + Koyeb)",
   );
 }
