@@ -17,6 +17,8 @@ export interface MarketQuote {
   asOf: string;
 }
 
+export type TradeAction = "BUY_CALL" | "BUY_PUT" | "HOLD";
+
 export interface PredictionResult {
   direction: "BULLISH" | "BEARISH" | "NEUTRAL";
   confidence: number;
@@ -25,6 +27,11 @@ export interface PredictionResult {
   reasoning: string;
   headlines: NewsHeadline[];
   quote: MarketQuote | null;
+  action: TradeAction;
+  strikeHint: string;
+  expiryHint: string;
+  entryTrigger: string;
+  riskNote: string;
   model: string;
   durationMs: number;
 }
@@ -203,7 +210,7 @@ export async function predictMarket(args: PredictArgs): Promise<PredictionResult
       }`
     : "(no live quote available)";
 
-  const prompt = `You are a market analysis assistant inside the NeuroLinked Brain. Produce a probabilistic forecast for the asset below.
+  const prompt = `You are a market analysis assistant inside the NeuroLinked Brain. Produce a probabilistic forecast AND an options trade signal for the asset below.
 
 ASSET
 - Symbol: ${args.symbol}
@@ -219,22 +226,43 @@ RECENT HEADLINES
 ${headlineBlock}
 
 TASK
-Weigh the headlines, sentiment and quote to predict the most likely directional bias for the given horizon. Be honest about uncertainty.
+1. Weigh the headlines, sentiment and quote to decide a directional bias for the given horizon.
+2. Translate that into an options trade signal:
+   - BUY_CALL when bias is bullish with enough conviction
+   - BUY_PUT when bias is bearish with enough conviction
+   - HOLD when conviction is too low or the picture is mixed
+3. Recommend strike (ATM / slightly-OTM / slightly-ITM) and expiry that fits the horizon.
+4. Give a clear "entry trigger" — a short, observable condition that should be true before opening the trade (e.g. "Wait for close above $275" or "Enter if pre-market sells off below $268").
+5. Add a one-line risk note for what would invalidate the thesis.
 
 Respond with STRICT JSON only, matching this shape:
 {
   "direction": "BULLISH" | "BEARISH" | "NEUTRAL",
   "confidence": <number between 0 and 1>,
+  "action": "BUY_CALL" | "BUY_PUT" | "HOLD",
+  "strikeHint": "<short strike recommendation, e.g. 'ATM ~$273' or 'Slightly OTM $280'>",
+  "expiryHint": "<expiry that matches the horizon, e.g. 'weekly Fri exp' or '30-45 DTE'>",
+  "entryTrigger": "<one short observable condition to enter>",
+  "riskNote": "<one short sentence on what would invalidate the trade>",
   "summary": "<one-sentence punchy verdict>",
   "reasoning": "<3-6 sentences citing the headlines by [n] when possible>"
 }
 
-Do not include any prose outside the JSON. Do not invent prices.`;
+Rules:
+- If confidence < 0.55, action MUST be "HOLD".
+- BUY_CALL only with BULLISH direction, BUY_PUT only with BEARISH.
+- Do not invent exact prices — base strike hints on the live quote shown.
+- No prose outside the JSON.`;
 
   let direction: "BULLISH" | "BEARISH" | "NEUTRAL" = "NEUTRAL";
   let confidence = 0.5;
   let summary = "No verdict produced.";
   let reasoning = "";
+  let action: TradeAction = "HOLD";
+  let strikeHint = "";
+  let expiryHint = "";
+  let entryTrigger = "";
+  let riskNote = "";
 
   try {
     const resp = await ai.models.generateContent({
@@ -242,7 +270,7 @@ Do not include any prose outside the JSON. Do not invent prices.`;
       contents: [{ role: "user", parts: [{ text: prompt }] }],
       config: {
         temperature: 0.3,
-        maxOutputTokens: 2048,
+        maxOutputTokens: 3072,
         responseMimeType: "application/json",
       },
     });
@@ -253,31 +281,47 @@ Do not include any prose outside the JSON. Do not invent prices.`;
     } catch {
       parsed = safeJsonExtract(text);
     }
+    const grabStr = (key: string): string => {
+      const re = new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`);
+      const m = text.match(re);
+      return m ? m[1].replace(/\\"/g, '"').replace(/\\n/g, " ").trim() : "";
+    };
+
     if (parsed && typeof parsed === "object") {
       direction = normalizeDirection(parsed.direction);
       const c = Number(parsed.confidence);
       if (Number.isFinite(c)) confidence = Math.max(0, Math.min(1, c));
-      if (typeof parsed.summary === "string" && parsed.summary.trim()) {
-        summary = parsed.summary.trim();
-      }
-      if (typeof parsed.reasoning === "string" && parsed.reasoning.trim()) {
-        reasoning = parsed.reasoning.trim();
-      }
+      if (typeof parsed.summary === "string" && parsed.summary.trim()) summary = parsed.summary.trim();
+      if (typeof parsed.reasoning === "string" && parsed.reasoning.trim()) reasoning = parsed.reasoning.trim();
+      const a = String(parsed.action ?? "").toUpperCase();
+      if (a === "BUY_CALL" || a === "BUY_PUT" || a === "HOLD") action = a;
+      if (typeof parsed.strikeHint === "string") strikeHint = parsed.strikeHint.trim();
+      if (typeof parsed.expiryHint === "string") expiryHint = parsed.expiryHint.trim();
+      if (typeof parsed.entryTrigger === "string") entryTrigger = parsed.entryTrigger.trim();
+      if (typeof parsed.riskNote === "string") riskNote = parsed.riskNote.trim();
     } else {
       // Truncated / malformed JSON — recover the fields with regex.
-      const dirM = text.match(/"direction"\s*:\s*"([A-Z]+)"/i);
+      const dirM = text.match(/"direction"\s*:\s*"([A-Z_]+)"/i);
       if (dirM) direction = normalizeDirection(dirM[1]);
       const confM = text.match(/"confidence"\s*:\s*([0-9.]+)/);
       if (confM) {
         const c = Number(confM[1]);
         if (Number.isFinite(c)) confidence = Math.max(0, Math.min(1, c));
       }
-      const sumM = text.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-      if (sumM) summary = sumM[1].replace(/\\"/g, '"').replace(/\\n/g, " ").trim() || summary;
-      const reaM = text.match(/"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"?/);
-      if (reaM) reasoning = reaM[1].replace(/\\"/g, '"').replace(/\\n/g, "\n").trim();
-      else reasoning = text.slice(0, 4000);
+      const actM = text.match(/"action"\s*:\s*"(BUY_CALL|BUY_PUT|HOLD)"/i);
+      if (actM) action = actM[1].toUpperCase() as TradeAction;
+      strikeHint = grabStr("strikeHint") || strikeHint;
+      expiryHint = grabStr("expiryHint") || expiryHint;
+      entryTrigger = grabStr("entryTrigger") || entryTrigger;
+      riskNote = grabStr("riskNote") || riskNote;
+      summary = grabStr("summary") || summary;
+      reasoning = grabStr("reasoning") || text.slice(0, 4000);
     }
+
+    // Safety: enforce the rules the model is supposed to follow itself.
+    if (confidence < 0.55) action = "HOLD";
+    if (action === "BUY_CALL" && direction !== "BULLISH") action = "HOLD";
+    if (action === "BUY_PUT" && direction !== "BEARISH") action = "HOLD";
   } catch (err) {
     logger.error({ err, symbol: args.symbol }, "market prediction failed");
     throw err instanceof Error ? err : new Error(String(err));
@@ -291,6 +335,11 @@ Do not include any prose outside the JSON. Do not invent prices.`;
     reasoning,
     headlines,
     quote,
+    action,
+    strikeHint,
+    expiryHint,
+    entryTrigger,
+    riskNote,
     model: MODEL,
     durationMs: Date.now() - start,
   };

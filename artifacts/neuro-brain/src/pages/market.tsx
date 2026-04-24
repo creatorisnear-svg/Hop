@@ -53,6 +53,8 @@ interface Quote {
   asOf: string;
 }
 
+type TradeAction = "BUY_CALL" | "BUY_PUT" | "HOLD";
+
 interface Prediction {
   id: string;
   watchId: string;
@@ -64,6 +66,11 @@ interface Prediction {
   reasoning: string;
   headlines: Headline[];
   quote: Quote | null;
+  action: TradeAction;
+  strikeHint: string;
+  expiryHint: string;
+  entryTrigger: string;
+  riskNote: string;
   model: string;
   durationMs: number;
   createdAt: string;
@@ -411,10 +418,33 @@ function directionMeta(d: Prediction["direction"]) {
   return { Icon: Minus, tone: "text-amber-300 bg-amber-300/10 border-amber-300/30" };
 }
 
+function actionMeta(a: TradeAction) {
+  if (a === "BUY_CALL") return {
+    label: "BUY CALL",
+    tone: "bg-green-500/15 border-green-500/50 text-green-400",
+    Icon: TrendingUp,
+    blurb: "Bullish — open a CALL option",
+  };
+  if (a === "BUY_PUT") return {
+    label: "BUY PUT",
+    tone: "bg-red-500/15 border-red-500/50 text-red-400",
+    Icon: TrendingDown,
+    blurb: "Bearish — open a PUT option",
+  };
+  return {
+    label: "HOLD / WAIT",
+    tone: "bg-amber-300/10 border-amber-300/40 text-amber-300",
+    Icon: Minus,
+    blurb: "Conviction too low — stay flat for now",
+  };
+}
+
 function PredictionCard({ prediction, headline }: { prediction: Prediction; headline?: boolean }) {
   const meta = directionMeta(prediction.direction);
   const Icon = meta.Icon;
   const pct = Math.round(prediction.confidence * 100);
+  const trade = actionMeta(prediction.action);
+  const TradeIcon = trade.Icon;
   return (
     <Card className={headline ? "border-primary/40" : undefined}>
       <CardContent className="pt-5 space-y-3">
@@ -427,6 +457,29 @@ function PredictionCard({ prediction, headline }: { prediction: Prediction; head
           <span className="text-xs text-muted-foreground ml-auto">
             {new Date(prediction.createdAt).toLocaleString()}
           </span>
+        </div>
+
+        <div className={`rounded-lg border p-4 ${trade.tone}`}>
+          <div className="flex items-center gap-2 text-lg font-extrabold tracking-wide">
+            <TradeIcon className="w-5 h-5" /> {trade.label}
+          </div>
+          <div className="text-xs opacity-90 mt-0.5">{trade.blurb}</div>
+          {(prediction.strikeHint || prediction.expiryHint || prediction.entryTrigger || prediction.riskNote) && (
+            <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-xs text-foreground">
+              {prediction.strikeHint && (
+                <div><span className="font-semibold opacity-80">Strike:</span> {prediction.strikeHint}</div>
+              )}
+              {prediction.expiryHint && (
+                <div><span className="font-semibold opacity-80">Expiry:</span> {prediction.expiryHint}</div>
+              )}
+              {prediction.entryTrigger && (
+                <div className="sm:col-span-2"><span className="font-semibold opacity-80">Enter when:</span> {prediction.entryTrigger}</div>
+              )}
+              {prediction.riskNote && (
+                <div className="sm:col-span-2 text-amber-300/90"><span className="font-semibold">Invalidated if:</span> {prediction.riskNote}</div>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="text-base font-medium leading-snug">{prediction.summary}</div>

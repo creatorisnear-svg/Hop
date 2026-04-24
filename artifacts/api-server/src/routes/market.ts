@@ -92,6 +92,11 @@ router.post("/market/watches/:id/predict", async (req, res) => {
         reasoning: result.reasoning,
         headlines: result.headlines,
         quote: result.quote,
+        action: result.action,
+        strikeHint: result.strikeHint,
+        expiryHint: result.expiryHint,
+        entryTrigger: result.entryTrigger,
+        riskNote: result.riskNote,
         model: result.model,
         durationMs: result.durationMs,
       })
